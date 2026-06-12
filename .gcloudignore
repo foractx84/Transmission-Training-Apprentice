@@ -1,0 +1,34 @@
+# Version control
+.git/
+.gitignore
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.pytest_cache/
+
+# IDE
+.vscode/
+.idea/
+
+# Terraform — never needed in container
+terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+.terraform/
+.terraform.lock.hcl
+
+# Local env files
+.env
+.env.local
+secrets/
+*.json.key
+
+# Docs and tests (optional — remove if needed at runtime)
+docs/
+tests/
+*.md

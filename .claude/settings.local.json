@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(rm app/main.py app/pages/apprentice_records.py app/pages/class_standing.py app/pages/program_analytics.py app/pages/program_structure.py app/pages/security_admin.py app/core/analytics_service.py app/core/bigquery_service.py app/core/rbac.py)",
+      "Bash(rmdir app/pages)"
+    ]
+  }
+}

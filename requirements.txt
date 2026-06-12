@@ -1,0 +1,10 @@
+streamlit>=1.32.0
+pandas>=2.1.0
+google-cloud-bigquery>=3.17.0
+google-cloud-bigquery-storage>=2.24.0
+google-cloud-storage>=2.14.0
+db-dtypes>=1.2.0
+pyarrow>=14.0.0
+plotly>=5.0.0
+pypdfium2>=4.25.0
+pillow>=10.0.0

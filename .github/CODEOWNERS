@@ -1,0 +1,7 @@
+# Default reviewers
+*                       @andrew-elliott-cnp
+
+# Infra changes need platform team approval
+/terraform/             @andrew-elliott-cnp @platform-team
+/Dockerfile             @andrew-elliott-cnp @platform-team
+/.github/workflows/     @andrew-elliott-cnp @platform-team
