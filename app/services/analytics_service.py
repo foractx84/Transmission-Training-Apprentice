@@ -4,6 +4,7 @@ Replaces the development mocks in `data/mock_data.py` with real BigQuery
 queries against `vw_apprentice_records`. Output dict shapes are intentionally
 identical to the mocks so existing render functions need no changes.
 """
+
 from __future__ import annotations
 
 import html
@@ -17,7 +18,7 @@ from google.cloud import bigquery
 from google.auth.exceptions import DefaultCredentialsError
 from google.api_core.exceptions import Forbidden, NotFound, BadRequest
 
-from app.core.config import get_bigquery_config   # ← use shared config
+from app.core.config import get_bigquery_config  # ← use shared config
 
 load_dotenv()
 
@@ -25,6 +26,7 @@ logger = logging.getLogger(__name__)
 
 
 # ── Remove old PROJECT_ID block entirely and replace with: ────────────────────
+
 
 def _get_bq_config() -> dict:
     """
@@ -58,11 +60,15 @@ def _view_fqn() -> str:
     bq_config = _get_bq_config()
     return f"{bq_config['project']}.{bq_config['dataset']}.vw_apprentice_records"
 
+
 DATE_COLS = (
-    "assigned_date", "completion_date",
-    "expected_completion_date", "requal_date",
+    "assigned_date",
+    "completion_date",
+    "expected_completion_date",
+    "requal_date",
     "course_last_updated",
-    "employment_start_date", "termination_date",
+    "employment_start_date",
+    "termination_date",
 )
 
 
@@ -97,7 +103,7 @@ def _clean_email(val) -> str:
     return str(val).lower().strip()
 
 
-_TAG_RE        = re.compile(r"<[^>]+>")
+_TAG_RE = re.compile(r"<[^>]+>")
 _WHITESPACE_RE = re.compile(r"\s+")
 
 
@@ -143,18 +149,20 @@ def load_apprentices() -> list[dict]:
             GROUP BY employee_id
             ORDER BY name
         """
-        df = _coerce_dates(_get_client().query(sql).to_dataframe(create_bqstorage_client=False))
+        df = _coerce_dates(
+            _get_client().query(sql).to_dataframe(create_bqstorage_client=False)
+        )
         return [
             {
-                "id":                  row["id"],
-                "name":                row["name"],
-                "level":               row["level"],
-                "email":               _clean_email(row.get("email")),
-                "enrolled_courses":    int(row["enrolled_courses"] or 0),
-                "open_tasks":          int(row["open_tasks"] or 0),
-                "delayed_tasks":       int(row["delayed_tasks"] or 0),
-                "program_alerts":      int(row["program_alerts"] or 0),
-                "start_date":          _to_date(row["start_date"]),
+                "id": row["id"],
+                "name": row["name"],
+                "level": row["level"],
+                "email": _clean_email(row.get("email")),
+                "enrolled_courses": int(row["enrolled_courses"] or 0),
+                "open_tasks": int(row["open_tasks"] or 0),
+                "delayed_tasks": int(row["delayed_tasks"] or 0),
+                "program_alerts": int(row["program_alerts"] or 0),
+                "start_date": _to_date(row["start_date"]),
                 "expected_completion": _to_date(row["expected_completion"]),
             }
             for _, row in df.iterrows()
@@ -184,17 +192,27 @@ def load_apprentice_records_for(employee_id: str) -> pd.DataFrame:
     try:
         sql = f"SELECT * FROM {_view_fqn()} WHERE employee_id = @eid"
         job = bigquery.QueryJobConfig(
-            query_parameters=[bigquery.ScalarQueryParameter("eid", "STRING", employee_id)]
+            query_parameters=[
+                bigquery.ScalarQueryParameter("eid", "STRING", employee_id)
+            ]
         )
-        return _coerce_dates(_get_client().query(sql, job_config=job).to_dataframe(create_bqstorage_client=False))
+        return _coerce_dates(
+            _get_client()
+            .query(sql, job_config=job)
+            .to_dataframe(create_bqstorage_client=False)
+        )
     except Forbidden as e:
-        logger.error("BigQuery permission denied in load_apprentice_records_for(%s): %s", employee_id, e)
+        logger.error(
+            "BigQuery permission denied in load_apprentice_records_for(%s): %s",
+            employee_id,
+            e,
+        )
         st.error("Permission denied loading training records.")
-        return pd.DataFrame()          # ← C3 FIX: was []
+        return pd.DataFrame()  # ← C3 FIX: was []
     except Exception as e:
         logger.error("Error in load_apprentice_records_for(%s): %s", employee_id, e)
         st.error("Failed to load training records. Please try again later.")
-        return pd.DataFrame()          # ← C3 FIX: was []
+        return pd.DataFrame()  # ← C3 FIX: was []
 
 
 # ---------------------------------------------------------------------------
@@ -210,11 +228,12 @@ def derive_milestones(records: pd.DataFrame) -> list[dict]:
     if records.empty:
         return []
 
-    grouped = (
-        records.groupby(["apprenticeship_level", "task_type"], as_index=False)
-               .agg(total=("course_id",    "count"),
-                    completed=("is_completed",  "sum"),
-                    open_=("is_open_task", "sum"))
+    grouped = records.groupby(
+        ["apprenticeship_level", "task_type"], as_index=False
+    ).agg(
+        total=("course_id", "count"),
+        completed=("is_completed", "sum"),
+        open_=("is_open_task", "sum"),
     )
 
     milestones: list[dict] = []
@@ -225,11 +244,13 @@ def derive_milestones(records: pd.DataFrame) -> list[dict]:
             status = "In Progress"
         else:
             status = "Open"
-        milestones.append({
-            "level":  row["apprenticeship_level"],
-            "name":   row["task_type"],
-            "status": status,
-        })
+        milestones.append(
+            {
+                "level": row["apprenticeship_level"],
+                "name": row["task_type"],
+                "status": status,
+            }
+        )
 
     order = {"Completed": 0, "In Progress": 1, "Open": 2}
     milestones.sort(key=lambda m: (order[m["status"]], m["level"], m["name"]))
@@ -251,19 +272,21 @@ def derive_training_summary(records: pd.DataFrame, limit: int = 25) -> list[dict
         return []
 
     status_map = {
-        "Complete":    "Completed",
-        "Current":     "Completed",
-        "Assigned":    "Scheduled",
-        "Coming Due":  "Scheduled",
+        "Complete": "Completed",
+        "Current": "Completed",
+        "Assigned": "Scheduled",
+        "Coming Due": "Scheduled",
         "In Progress": "In Progress",
-        "Past Due":    "Past Due",
-        "Failed":      "Failed",
-        "Suspended":   "Suspended",
+        "Past Due": "Past Due",
+        "Failed": "Failed",
+        "Suspended": "Suspended",
     }
 
     df = records.copy()
     df["activity_date"] = df["completion_date"].fillna(df["assigned_date"])
-    df = df.sort_values("activity_date", ascending=False, na_position="last").head(limit)
+    df = df.sort_values("activity_date", ascending=False, na_position="last").head(
+        limit
+    )
 
     out: list[dict] = []
     for _, r in df.iterrows():
@@ -271,14 +294,18 @@ def derive_training_summary(records: pd.DataFrame, limit: int = 25) -> list[dict
         if len(notes) > 140:
             notes = notes[:137] + "…"
         hours = (r.get("course_duration_minutes") or 0) / 60.0
-        out.append({
-            "topic":      r.get("task_name") or r.get("course_name") or "—",
-            "status":     status_map.get(r.get("qual_status"), r.get("qual_status") or "—"),
-            "date":       _to_date(r["activity_date"]),
-            "instructor": "—",
-            "hours":      round(float(hours), 1),
-            "notes":      notes,
-        })
+        out.append(
+            {
+                "topic": r.get("task_name") or r.get("course_name") or "—",
+                "status": status_map.get(
+                    r.get("qual_status"), r.get("qual_status") or "—"
+                ),
+                "date": _to_date(r["activity_date"]),
+                "instructor": "—",
+                "hours": round(float(hours), 1),
+                "notes": notes,
+            }
+        )
     return out
 
 
@@ -296,37 +323,45 @@ def derive_docs_alerts(records: pd.DataFrame) -> list[dict]:
     alerts: list[dict] = []
 
     for _, r in records[records["qual_status"] == "Past Due"].head(5).iterrows():
-        alerts.append({
-            "priority": "High",
-            "type":     "Alert",
-            "message":  f"Past due: {r['task_name']} (recert was due {_to_date(r['requal_date'])})",
-        })
+        alerts.append(
+            {
+                "priority": "High",
+                "type": "Alert",
+                "message": f"Past due: {r['task_name']} (recert was due {_to_date(r['requal_date'])})",
+            }
+        )
 
     for _, r in records[records["qual_status"] == "Failed"].head(5).iterrows():
         score = int(r["score"]) if pd.notna(r.get("score")) else "—"
-        alerts.append({
-            "priority": "High",
-            "type":     "Alert",
-            "message":  f"Failed: {r['task_name']} (score {score})",
-        })
+        alerts.append(
+            {
+                "priority": "High",
+                "type": "Alert",
+                "message": f"Failed: {r['task_name']} (score {score})",
+            }
+        )
 
     for _, r in records[records["qual_status"] == "Coming Due"].head(5).iterrows():
-        alerts.append({
-            "priority": "Medium",
-            "type":     "Alert",
-            "message":  f"Recert due {_to_date(r['requal_date'])}: {r['task_name']}",
-        })
+        alerts.append(
+            {
+                "priority": "Medium",
+                "type": "Alert",
+                "message": f"Recert due {_to_date(r['requal_date'])}: {r['task_name']}",
+            }
+        )
 
     completed = records[records["completion_date"].notna()].sort_values(
         "completion_date", ascending=False
     )
     if not completed.empty:
         r = completed.iloc[0]
-        alerts.append({
-            "priority": "Info",
-            "type":     "Document",
-            "message":  f"Completed {_to_date(r['completion_date'])}: {r['task_name']}",
-        })
+        alerts.append(
+            {
+                "priority": "Info",
+                "type": "Document",
+                "message": f"Completed {_to_date(r['completion_date'])}: {r['task_name']}",
+            }
+        )
 
     return alerts
 
@@ -378,25 +413,27 @@ def load_class_standing() -> list[dict]:
             GROUP BY employee_id
             ORDER BY level, name
         """
-        df = _coerce_dates(_get_client().query(sql).to_dataframe(create_bqstorage_client=False))
+        df = _coerce_dates(
+            _get_client().query(sql).to_dataframe(create_bqstorage_client=False)
+        )
         return [
             {
-                "id":                  row["id"],
-                "name":                row["name"],
-                "email":               _clean_email(row.get("email")),
-                "level":               row.get("level") or "Unknown",
-                "supervisor_name":     row.get("supervisor_name") or "Unknown",
-                "division":            row.get("division") or "",
-                "bu":                  row.get("bu") or "",
-                "enrolled_courses":    int(row["enrolled_courses"] or 0),
-                "completed_courses":   int(row["completed_courses"] or 0),
-                "open_tasks":          int(row["open_tasks"] or 0),
-                "delayed_tasks":       int(row["delayed_tasks"] or 0),
-                "program_alerts":      int(row["program_alerts"] or 0),
-                "completion_pct":      float(row["completion_pct"] or 0.0),
-                "status":              row.get("status") or "On Track",
+                "id": row["id"],
+                "name": row["name"],
+                "email": _clean_email(row.get("email")),
+                "level": row.get("level") or "Unknown",
+                "supervisor_name": row.get("supervisor_name") or "Unknown",
+                "division": row.get("division") or "",
+                "bu": row.get("bu") or "",
+                "enrolled_courses": int(row["enrolled_courses"] or 0),
+                "completed_courses": int(row["completed_courses"] or 0),
+                "open_tasks": int(row["open_tasks"] or 0),
+                "delayed_tasks": int(row["delayed_tasks"] or 0),
+                "program_alerts": int(row["program_alerts"] or 0),
+                "completion_pct": float(row["completion_pct"] or 0.0),
+                "status": row.get("status") or "On Track",
                 "expected_completion": _to_date(row["expected_completion"]),
-                "start_date":          _to_date(row["start_date"]),
+                "start_date": _to_date(row["start_date"]),
             }
             for _, row in df.iterrows()
         ]
@@ -451,7 +488,9 @@ def load_apprentice_by_email(email: str) -> dict | None:
 
     try:
         df = _coerce_dates(
-            _get_client().query(sql, job_config=job_config).to_dataframe(create_bqstorage_client=False)
+            _get_client()
+            .query(sql, job_config=job_config)
+            .to_dataframe(create_bqstorage_client=False)
         )
     except Exception as e:
         logger.error("Error in load_apprentice_by_email(%s): %s", email, e)  # ← I1 FIX
@@ -463,15 +502,15 @@ def load_apprentice_by_email(email: str) -> dict | None:
 
     row = df.iloc[0]
     return {
-        "id":                  row["id"],
-        "name":                row["name"],
-        "email":               _clean_email(row.get("email")),
-        "level":               row.get("level") or "Unknown",
-        "enrolled_courses":    int(row["enrolled_courses"] or 0),
-        "open_tasks":          int(row["open_tasks"] or 0),
-        "delayed_tasks":       int(row["delayed_tasks"] or 0),
-        "program_alerts":      int(row["program_alerts"] or 0),
-        "start_date":          _to_date(row["start_date"]),
+        "id": row["id"],
+        "name": row["name"],
+        "email": _clean_email(row.get("email")),
+        "level": row.get("level") or "Unknown",
+        "enrolled_courses": int(row["enrolled_courses"] or 0),
+        "open_tasks": int(row["open_tasks"] or 0),
+        "delayed_tasks": int(row["delayed_tasks"] or 0),
+        "program_alerts": int(row["program_alerts"] or 0),
+        "start_date": _to_date(row["start_date"]),
         "expected_completion": _to_date(row["expected_completion"]),
     }
 
@@ -482,7 +521,9 @@ def load_program_analytics(supervisor_name: str | None = None) -> list[dict]:
     Load aggregated analytics per apprentice.
     If supervisor_name is provided, filter to that supervisor's apprentices only.
     """
-    supervisor_filter = "AND SUPERVISOR_NAME = @supervisor_name" if supervisor_name else ""
+    supervisor_filter = (
+        "AND SUPERVISOR_NAME = @supervisor_name" if supervisor_name else ""
+    )
 
     sql = f"""
         SELECT
@@ -537,6 +578,7 @@ def load_program_analytics(supervisor_name: str | None = None) -> list[dict]:
     job_config = None
     if supervisor_name:
         from google.cloud import bigquery as bq
+
         job_config = bq.QueryJobConfig(
             query_parameters=[
                 bq.ScalarQueryParameter("supervisor_name", "STRING", supervisor_name)
@@ -545,32 +587,34 @@ def load_program_analytics(supervisor_name: str | None = None) -> list[dict]:
 
     try:
         df = _coerce_dates(
-            _get_client().query(sql, job_config=job_config).to_dataframe(create_bqstorage_client=False)
+            _get_client()
+            .query(sql, job_config=job_config)
+            .to_dataframe(create_bqstorage_client=False)
         )
         return [
             {
-                "id":               row["id"],
-                "name":             row["name"],
-                "level":            row.get("level") or "Unknown",
-                "supervisor_name":  row.get("supervisor_name") or "Unknown",
-                "division":         row.get("division") or "",
-                "bu":               row.get("bu") or "",
-                "total_courses":    int(row["total_courses"] or 0),
-                "completed_courses":int(row["completed_courses"] or 0),
-                "failed_courses":   int(row["failed_courses"] or 0),
-                "delayed_courses":  int(row["delayed_courses"] or 0),
-                "coming_due":       int(row["coming_due"] or 0),
-                "completion_pct":   float(row["completion_pct"] or 0.0),
-                "fail_rate_pct":    float(row["fail_rate_pct"] or 0.0),
-                "start_date":       _to_date(row["start_date"]),
-                "completion_date":  _to_date(row["completion_date"]),
+                "id": row["id"],
+                "name": row["name"],
+                "level": row.get("level") or "Unknown",
+                "supervisor_name": row.get("supervisor_name") or "Unknown",
+                "division": row.get("division") or "",
+                "bu": row.get("bu") or "",
+                "total_courses": int(row["total_courses"] or 0),
+                "completed_courses": int(row["completed_courses"] or 0),
+                "failed_courses": int(row["failed_courses"] or 0),
+                "delayed_courses": int(row["delayed_courses"] or 0),
+                "coming_due": int(row["coming_due"] or 0),
+                "completion_pct": float(row["completion_pct"] or 0.0),
+                "fail_rate_pct": float(row["fail_rate_pct"] or 0.0),
+                "start_date": _to_date(row["start_date"]),
+                "completion_date": _to_date(row["completion_date"]),
                 "expected_completion": _to_date(row["expected_completion"]),
-                "status":           row.get("status") or "On Track",
+                "status": row.get("status") or "On Track",
             }
             for _, row in df.iterrows()
         ]
-    except Forbidden as e:
-        logger.error("Permission denied in load_program_analytics: %s", e)
+    except Forbidden:
+        logger.error("Permission denied in load_program_analytics")
         st.error("Permission denied loading analytics data.")
         return []
     except Exception as e:
@@ -580,12 +624,40 @@ def load_program_analytics(supervisor_name: str | None = None) -> list[dict]:
 
 
 @st.cache_data(ttl=3600, show_spinner="Loading trend data…")
-def load_analytics_trend(supervisor_name: str | None = None) -> list[dict]:
+def load_analytics_trend(
+    supervisor_name: str | None = None,
+    employee_ids: tuple[str, ...] | None = None,
+) -> list[dict]:
     """
     Load monthly completion trend grouped by completion_date.
-    If supervisor_name is provided, filter to that supervisor only.
+
+    Args:
+        supervisor_name: If provided, restrict to that supervisor's apprentices.
+        employee_ids: If provided, restrict to completions belonging to that
+            set of apprentice employee IDs. An empty tuple yields zero rows.
+            Pass `None` to skip the IN-clause filter entirely.
     """
-    supervisor_filter = "AND SUPERVISOR_NAME = @supervisor_name" if supervisor_name else ""
+    from google.cloud import bigquery as bq
+
+    filters: list[str] = [
+        "completion_date IS NOT NULL",
+        "apprentice_name IS NOT NULL",
+    ]
+    params: list = []
+
+    if supervisor_name:
+        filters.append("SUPERVISOR_NAME = @supervisor_name")
+        params.append(
+            bq.ScalarQueryParameter("supervisor_name", "STRING", supervisor_name)
+        )
+
+    if employee_ids is not None:
+        filters.append("employee_id IN UNNEST(@employee_ids)")
+        params.append(
+            bq.ArrayQueryParameter("employee_ids", "STRING", list(employee_ids))
+        )
+
+    where_clause = " AND ".join(filters)
 
     sql = f"""
         SELECT
@@ -594,24 +666,19 @@ def load_analytics_trend(supervisor_name: str | None = None) -> list[dict]:
           SUM(CAST(is_failed AS INT64))           AS failures,
           SUM(CAST(is_delayed AS INT64))          AS delays
         FROM {_view_fqn()}
-        WHERE completion_date IS NOT NULL
-          AND apprentice_name IS NOT NULL
-          {supervisor_filter}
+        WHERE {where_clause}
         GROUP BY month
         ORDER BY month
     """
 
-    job_config = None
-    if supervisor_name:
-        from google.cloud import bigquery as bq
-        job_config = bq.QueryJobConfig(
-            query_parameters=[
-                bq.ScalarQueryParameter("supervisor_name", "STRING", supervisor_name)
-            ]
-        )
+    job_config = bq.QueryJobConfig(query_parameters=params) if params else None
 
     try:
-        df = _get_client().query(sql, job_config=job_config).to_dataframe(create_bqstorage_client=False)
+        df = (
+            _get_client()
+            .query(sql, job_config=job_config)
+            .to_dataframe(create_bqstorage_client=False)
+        )
         return df.to_dict("records")
     except Exception as e:
         logger.error("Error in load_analytics_trend: %s", e)
