@@ -642,6 +642,8 @@ def load_analytics_trend(
     filters: list[str] = [
         "completion_date IS NOT NULL",
         "apprentice_name IS NOT NULL",
+        f"DATE(completion_date) >= DATE_SUB("
+        f"(SELECT DATE(MAX(completion_date)) FROM {_view_fqn()}), INTERVAL 5 YEAR)",
     ]
     params: list = []
 

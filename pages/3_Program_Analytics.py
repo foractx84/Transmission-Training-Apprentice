@@ -92,6 +92,22 @@ def _inject_styles() -> None:
             font-weight: 700;
         }
         .section-divider { border-top: 1px solid #2d3748; margin: 1rem 0; }
+        .st-key-kpi_card_alerts,
+        .st-key-kpi_card_fails,
+        .st-key-kpi_card_delays {
+            margin-top: -6.4rem;
+            position: relative;
+            z-index: 5;
+        }
+        .st-key-kpi_card_alerts button,
+        .st-key-kpi_card_fails button,
+        .st-key-kpi_card_delays button {
+            height: 5.4rem;
+            opacity: 0;
+            cursor: pointer;
+        }
+        .kpi-card { cursor: pointer; transition: border 0.15s ease; }
+        .kpi-card:hover { border: 1px solid #63b3ed; }
         </style>
         """,
         unsafe_allow_html=True,
@@ -115,29 +131,83 @@ def _kpi_card(label: str, value: str, alert: bool = False) -> None:
 
 def _render_kpis(df: pd.DataFrame) -> None:
     c1, c2, c3, c4, c5 = st.columns(5)
-    with c1:
-        _kpi_card(
-            "Program Alerts",
-            str(int(df["coming_due"].sum())),
-            alert=df["coming_due"].sum() > 0,
-        )
-    with c2:
-        _kpi_card(
-            "Program Fails",
-            str(int(df["failed_courses"].sum())),
-            alert=df["failed_courses"].sum() > 0,
-        )
-    with c3:
-        _kpi_card(
-            "Active Delays",
-            str(int(df["delayed_courses"].sum())),
-            alert=df["delayed_courses"].sum() > 0,
-        )
+
+    clickable = [
+        (c1, "Program Alerts", "coming_due",     "alerts"),
+        (c2, "Program Fails",  "failed_courses", "fails"),
+        (c3, "Active Delays",  "delayed_courses", "delays"),
+    ]
+    for col, label, value_col, drill_key in clickable:
+        total = int(df[value_col].sum()) if not df.empty else 0
+        with col:
+            _kpi_card(label, str(total), alert=total > 0)
+            # 4.1–4.3 — whole card is clickable: this button is made transparent
+            # and pulled up over the card via CSS (.st-key-kpi_card_* in _inject_styles).
+            if st.button(
+                f"Open {label}", key=f"kpi_card_{drill_key}", use_container_width=True
+            ):
+                # Toggle: click the same card again to close.
+                st.session_state.kpi_drill = (
+                    None if st.session_state.get("kpi_drill") == drill_key else drill_key
+                )
+
     with c4:
         avg = round(df["completion_pct"].mean(), 1) if not df.empty else 0.0
         _kpi_card("Overall Completion", f"{avg}%")
     with c5:
         _kpi_card("Financial Impact", "Placeholder")
+
+    _render_kpi_drilldown(df)
+
+
+def _render_kpi_drilldown(df: pd.DataFrame) -> None:
+    """4.1–4.3 — show who/what contributes to the clicked KPI card."""
+    drill = st.session_state.get("kpi_drill")
+    if not drill:
+        return
+
+    if drill == "alerts":
+        title   = "🔔 Program Alerts — coming due"
+        caption = "Included because a recert or assignment is coming due."
+        sub     = df[df["coming_due"] > 0]
+        cols    = {
+            "name": "Apprentice", "supervisor_name": "Supervisor",
+            "coming_due": "Coming Due", "expected_completion": "Expected Completion",
+            "status": "Status",
+        }
+    elif drill == "fails":
+        title   = "❌ Program Fails"
+        caption = "Apprentices with one or more failed courses."
+        sub     = df[df["failed_courses"] > 0]
+        cols    = {
+            "name": "Apprentice", "supervisor_name": "Supervisor",
+            "failed_courses": "Failed Courses", "fail_rate_pct": "Fail Rate %",
+            "status": "Status",
+        }
+    else:  # delays
+        title   = "⏳ Active Delays"
+        caption = "Apprentices with one or more delayed tasks."
+        sub     = df[df["delayed_courses"] > 0]
+        cols    = {
+            "name": "Apprentice", "supervisor_name": "Supervisor",
+            "delayed_courses": "Delayed Tasks", "expected_completion": "Expected Completion",
+            "status": "Status",
+        }
+
+    st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
+    st.markdown(f"#### {title}")
+    st.caption(caption)
+
+    if sub.empty:
+        st.success("Nothing to show — count is zero for the current filters.")
+        return
+
+    table = sub[list(cols.keys())].copy()
+    if "expected_completion" in table.columns:
+        table["expected_completion"] = table["expected_completion"].apply(format_date)
+    table.columns = list(cols.values())
+    st.dataframe(table, use_container_width=True, hide_index=True)
+    st.caption(f"{len(sub)} apprentice(s) contributing.")
 
 
 # ── Plotly chart helper ───────────────────────────────────────────────────────
@@ -153,6 +223,12 @@ def _dark_layout(fig: go.Figure, height: int = 350) -> go.Figure:
         height=height,
     )
     return fig
+
+
+def _abbr(text: str) -> str:
+    """3.5 — shorten verbose labels so chart axes/legends/headers fit on screen
+    without horizontal scrolling (e.g. '1st Year Apprentice' → '1st Year Appr.')."""
+    return text.replace("Apprentices", "Appr.").replace("Apprentice", "Appr.")
 
 
 # ── Section: Trend ────────────────────────────────────────────────────────────
@@ -292,6 +368,7 @@ def _render_completion_by_division(df: pd.DataFrame) -> None:
 # ── Section: Completion by Supervisor — paginated table ───────────────────────
 
 def _render_supervisor_table(df: pd.DataFrame) -> None:
+    st.markdown("##### Supervisor Summary")
     if df.empty:
         st.info("No data.")
         return
@@ -311,7 +388,7 @@ def _render_supervisor_table(df: pd.DataFrame) -> None:
     sup_df["avg_completion"] = sup_df["avg_completion"].apply(lambda v: f"{v:.1f}%")
     sup_df["at_risk"]        = sup_df["at_risk"].astype(int)
     sup_df["delayed"]        = sup_df["delayed"].astype(int)
-    sup_df.columns           = ["Supervisor", "Avg Completion %", "# Apprentices", "At Risk", "Delayed"]
+    sup_df.columns           = ["Supervisor", "Avg Completion %", _abbr("# Apprentices"), "At Risk", "Delayed"]
 
     # Paginate — 10 rows per page
     page_size = 10
@@ -325,6 +402,7 @@ def _render_supervisor_table(df: pd.DataFrame) -> None:
 # ── Section: At Risk — paginated table ───────────────────────────────────────
 
 def _render_at_risk_table(df: pd.DataFrame) -> None:
+    st.markdown("##### Individual Apprentice Details")
     at_risk = df[df["status"] == "At Risk"].sort_values("failed_courses", ascending=False)
 
     if at_risk.empty:
