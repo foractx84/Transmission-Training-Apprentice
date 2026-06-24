@@ -20,6 +20,11 @@ from app.services.bigquery_service import (
     fetch_evaluation_by_id,
 )
 from app.utils.formatters import format_date
+from app.utils.org_groups import (
+    BUSINESS_GROUPS,
+    UNMAPPED,
+    classify_business_group,
+)
 
 
 # ── Styles ────────────────────────────────────────────────────────────────────
@@ -308,26 +313,49 @@ def _render_pass_fail(df: pd.DataFrame) -> None:
     st.plotly_chart(fig, use_container_width=True)
 
 
-# ── Section: Completion by Level ──────────────────────────────────────────────
+# ── Section: Completion by Apprentice Year ───────────────────────────────────
 
-def _render_completion_by_level(df: pd.DataFrame) -> None:
+def _render_completion_by_year(df: pd.DataFrame) -> None:
     if df.empty:
         st.info("No data.")
         return
+    if "apprentice_year_label" not in df.columns:
+        st.warning(
+            "Apprentice-year columns not loaded — the data is cached. "
+            'Clear the cache (press "C", or ⋮ → Clear cache) and rerun.'
+        )
+        return
 
-    level_df = (
-        df.groupby("level")["completion_pct"].mean().reset_index()
-        .rename(columns={"completion_pct": "Avg Completion %", "level": "Level"})
-        .sort_values("Avg Completion %", ascending=True)
+    no_year_mask = (
+        df["apprentice_year"].isna()
+        | df["apprentice_year_label"].fillna("").str.strip().isin(["", "Unknown"])
     )
+    no_year_count = int(no_year_mask.sum())
+
+    year_df = (
+        df[~no_year_mask]
+        .groupby(["apprentice_year", "apprentice_year_label"], as_index=False)["completion_pct"]
+        .mean()
+        .sort_values("apprentice_year")                       # 1st → 4th order
+        .rename(columns={"completion_pct": "Avg Completion %",
+                         "apprentice_year_label": "Year"})
+    )
+    if year_df.empty:
+        st.info("No apprentice-year values for the current filters.")
+        return
+
     fig = px.bar(
-        level_df, x="Avg Completion %", y="Level",
-        orientation="h", color="Avg Completion %",
-        color_continuous_scale="Blues", range_x=[0, 100],
-        text=level_df["Avg Completion %"].apply(lambda v: f"{v:.1f}%"),
+        year_df, x="Year", y="Avg Completion %",              # vertical columns
+        color="Avg Completion %", color_continuous_scale="Blues",
+        range_y=[0, 100],
+        text=year_df["Avg Completion %"].apply(lambda v: f"{v:.1f}%"),
     )
     fig.update_traces(textposition="outside")
+    fig.update_xaxes(title_text="", tickangle=0)              # short labels, no scroll
     st.plotly_chart(_dark_layout(fig), use_container_width=True)
+
+    if no_year_count:
+        st.caption(f"⚠️ {no_year_count} apprentice(s) have no assigned year (excluded above).")
 
 
 # ── Helper: row-level Division/BU fallback ──────────────────────────────────
@@ -640,6 +668,10 @@ def main() -> None:
         st.warning("No analytics data available.")
         return
 
+    # 3.1 — derive the Transmission/Distribution/Substation group from the
+    # cost-center (org_group). Edit rules in app/utils/org_groups.py.
+    df["business_group"] = df["org_group"].map(classify_business_group)
+
     years = ["All"] + sorted(
         df["expected_completion"].dropna()
         .apply(lambda d: str(d.year) if hasattr(d, "year") else None)
@@ -657,6 +689,19 @@ def main() -> None:
     else:
         date_from = date_to = None
 
+    # 3.1 — Org Group dropdown, default "All Electric".
+    selected_org = st.sidebar.selectbox("Org Group", ["All Electric"] + BUSINESS_GROUPS)
+
+    unmapped = (
+        df.loc[df["business_group"] == UNMAPPED, "org_group"]
+        .replace("", pd.NA).dropna().value_counts()
+    )
+    if not unmapped.empty:
+        with st.sidebar.expander(f"⚙ Org mapping — {len(unmapped)} unmapped", expanded=False):
+            st.caption("Add keywords for these in app/utils/org_groups.py:")
+            for cost_center, n in unmapped.items():
+                st.caption(f"• {cost_center} ({n})")
+
     levels = ["All"] + sorted(df["level"].dropna().unique().tolist())
     selected_level  = st.sidebar.selectbox("Level", levels)
 
@@ -673,6 +718,8 @@ def main() -> None:
 
     # ── Apply Filters ─────────────────────────────────────────────────────────
     filtered = df.copy()
+    if selected_org != "All Electric":
+        filtered = filtered[filtered["business_group"] == selected_org]
     if selected_level != "All":
         filtered = filtered[filtered["level"] == selected_level]
     if selected_div != "All":
@@ -712,10 +759,10 @@ def main() -> None:
     with col_pf:
         _render_pass_fail(filtered)
 
-    # 3. Completion by Level ───────────────────────────────────────────────────
-    st.markdown('<div class="section-header">🎓 Completion Rate by Level</div>', unsafe_allow_html=True)
+    # 3. Completion by Apprentice Year (3.4) ───────────────────────────────────
+    st.markdown('<div class="section-header">🎓 Completion Rate by Apprentice Year</div>', unsafe_allow_html=True)
     st.markdown("---")
-    _render_completion_by_level(filtered)
+    _render_completion_by_year(filtered)
 
     # 4. Completion by Division/BU ─────────────────────────────────────────────
     st.markdown('<div class="section-header">🏢 Completion Rate by Division / BU</div>', unsafe_allow_html=True)

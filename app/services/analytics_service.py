@@ -73,6 +73,19 @@ DATE_COLS = (
 
 
 # ---------------------------------------------------------------------------
+# Shared filters (derived from the new vw_apprentice_records columns)
+# ---------------------------------------------------------------------------
+_POP_FILTER = """
+    apprentice_name IS NOT NULL
+    AND is_active_employee = TRUE
+    AND is_in_apprentice_program = TRUE
+    AND UPPER(BU) LIKE '%ELECTRIC%'
+""".strip()
+
+_PROGRAM = "is_program_course"
+
+
+# ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
 def _coerce_dates(df: pd.DataFrame) -> pd.DataFrame:
@@ -91,6 +104,18 @@ def _to_date(val) -> date | None:
     return pd.Timestamp(val).date()
 
 
+def _safe_float(val, default: float = 0.0) -> float:
+    """NaN/None-safe float conversion.
+
+    `val or 0.0` does NOT work here: SAFE_DIVIDE returns NULL → NaN, and
+    `NaN or 0.0` keeps the NaN (NaN is truthy). Apprentices with zero program
+    courses produce a NaN completion %, which then crashes st.progress().
+    """
+    if val is None or pd.isna(val):
+        return default
+    return float(val)
+
+
 def _clean_email(val) -> str:
     """Return a lower-cased, stripped email string.
 
@@ -98,7 +123,7 @@ def _clean_email(val) -> str:
     plain `(val or "")` leaves the NaN in place and `.lower()` then crashes.
     Guard with pd.isna() before treating the value as a string.
     """
-    if val is None or (isinstance(val, float) and pd.isna(val)):
+    if pd.isna(val):
         return ""
     return str(val).lower().strip()
 
@@ -109,7 +134,7 @@ _WHITESPACE_RE = re.compile(r"\s+")
 
 def _strip_html(value) -> str:
     """Remove HTML tags + decode entities + collapse whitespace."""
-    if value is None or (isinstance(value, float) and pd.isna(value)):
+    if pd.isna(value):
         return ""
     text = str(value)
     text = _TAG_RE.sub(" ", text)
@@ -137,15 +162,15 @@ def load_apprentices() -> list[dict]:
               ANY_VALUE(apprentice_name)                   AS name,
               ANY_VALUE(LOWER(employee_email))             AS email,
               ANY_VALUE(apprenticeship_level)              AS level,
-              COUNT(DISTINCT course_id)                    AS enrolled_courses,
-              SUM(CAST(is_open_task    AS INT64))          AS open_tasks,
-              SUM(CAST(is_delayed      AS INT64))          AS delayed_tasks,
-              SUM(CAST(is_failed       AS INT64))
-                + SUM(CAST(is_coming_due AS INT64))        AS program_alerts,
+              COUNT(DISTINCT IF({_PROGRAM}, course_id, NULL))   AS enrolled_courses,
+              COUNTIF(is_open_task AND {_PROGRAM})              AS open_tasks,
+              COUNTIF(is_delayed   AND {_PROGRAM})              AS delayed_tasks,
+              COUNTIF(is_failed     AND {_PROGRAM})
+                + COUNTIF(is_coming_due AND {_PROGRAM})         AS program_alerts,
               MIN(assigned_date)                           AS start_date,
               MAX(expected_completion_date)                AS expected_completion
             FROM {_view_fqn()}
-            WHERE apprentice_name IS NOT NULL
+            WHERE {_POP_FILTER}
             GROUP BY employee_id
             ORDER BY name
         """
@@ -378,38 +403,39 @@ def load_class_standing() -> list[dict]:
               ANY_VALUE(LOWER(employee_email))                  AS email,
               ANY_VALUE(apprenticeship_level)                   AS level,
               ANY_VALUE(SUPERVISOR_NAME)                        AS supervisor_name,
+              ANY_VALUE(supervisor_email)                       AS supervisor_email,
               ANY_VALUE(Division)                               AS division,
               ANY_VALUE(BU)                                     AS bu,
+              ANY_VALUE(org_group)                              AS org_group,
 
-              COUNT(DISTINCT course_id)                         AS enrolled_courses,
-              SUM(CAST(is_completed    AS INT64))               AS completed_courses,
-              SUM(CAST(is_open_task    AS INT64))               AS open_tasks,
-              SUM(CAST(is_delayed      AS INT64))               AS delayed_tasks,
-              SUM(CAST(is_failed       AS INT64))
-                + SUM(CAST(is_coming_due AS INT64))             AS program_alerts,
+              COUNT(DISTINCT IF({_PROGRAM}, course_id, NULL))                  AS enrolled_courses,
+              COUNT(DISTINCT IF({_PROGRAM} AND is_completed, course_id, NULL)) AS completed_courses,
+              COUNTIF(is_open_task AND {_PROGRAM})              AS open_tasks,
+              COUNTIF(is_delayed   AND {_PROGRAM})              AS delayed_tasks,
+              COUNTIF(is_failed     AND {_PROGRAM})
+                + COUNTIF(is_coming_due AND {_PROGRAM})         AS program_alerts,
 
-              ROUND(
+              LEAST(ROUND(
                 SAFE_DIVIDE(
-                  SUM(CAST(is_completed AS INT64)),
-                  COUNT(DISTINCT course_id)
+                  COUNT(DISTINCT IF({_PROGRAM} AND is_completed, course_id, NULL)),
+                  COUNT(DISTINCT IF({_PROGRAM}, course_id, NULL))
                 ) * 100, 1
-              )                                                 AS completion_pct,
+              ), 100.0)                                         AS completion_pct,
 
               MAX(expected_completion_date)                     AS expected_completion,
               MIN(assigned_date)                                AS start_date,
 
               CASE
-                WHEN SUM(CAST(is_failed  AS INT64)) > 0 THEN 'At Risk'
-                WHEN SUM(CAST(is_delayed AS INT64)) > 0 THEN 'Delayed'
-                WHEN SAFE_DIVIDE(
-                       SUM(CAST(is_completed AS INT64)),
-                       COUNT(DISTINCT course_id)
-                     ) = 1.0                                    THEN 'Completed'
+                WHEN COUNTIF(is_failed  AND {_PROGRAM}) > 0 THEN 'At Risk'
+                WHEN COUNTIF(is_delayed AND {_PROGRAM}) > 0 THEN 'Delayed'
+                WHEN COUNT(DISTINCT IF({_PROGRAM}, course_id, NULL)) > 0
+                 AND COUNT(DISTINCT IF({_PROGRAM} AND is_completed, course_id, NULL))
+                     = COUNT(DISTINCT IF({_PROGRAM}, course_id, NULL))      THEN 'Completed'
                 ELSE 'On Track'
               END                                               AS status
 
             FROM {_view_fqn()}
-            WHERE apprentice_name IS NOT NULL
+            WHERE {_POP_FILTER}
             GROUP BY employee_id
             ORDER BY level, name
         """
@@ -423,14 +449,16 @@ def load_class_standing() -> list[dict]:
                 "email": _clean_email(row.get("email")),
                 "level": row.get("level") or "Unknown",
                 "supervisor_name": row.get("supervisor_name") or "Unknown",
+                "supervisor_email": _clean_email(row.get("supervisor_email")) or None,
                 "division": row.get("division") or "",
                 "bu": row.get("bu") or "",
+                "org_group": row.get("org_group") or "",
                 "enrolled_courses": int(row["enrolled_courses"] or 0),
                 "completed_courses": int(row["completed_courses"] or 0),
                 "open_tasks": int(row["open_tasks"] or 0),
                 "delayed_tasks": int(row["delayed_tasks"] or 0),
                 "program_alerts": int(row["program_alerts"] or 0),
-                "completion_pct": float(row["completion_pct"] or 0.0),
+                "completion_pct": _safe_float(row["completion_pct"]),
                 "status": row.get("status") or "On Track",
                 "expected_completion": _to_date(row["expected_completion"]),
                 "start_date": _to_date(row["start_date"]),
@@ -467,16 +495,16 @@ def load_apprentice_by_email(email: str) -> dict | None:
           ANY_VALUE(apprentice_name)                   AS name,
           ANY_VALUE(LOWER(employee_email))             AS email,
           ANY_VALUE(apprenticeship_level)              AS level,
-          COUNT(DISTINCT course_id)                    AS enrolled_courses,
-          SUM(CAST(is_open_task    AS INT64))          AS open_tasks,
-          SUM(CAST(is_delayed      AS INT64))          AS delayed_tasks,
-          SUM(CAST(is_failed       AS INT64))
-            + SUM(CAST(is_coming_due AS INT64))        AS program_alerts,
+          COUNT(DISTINCT IF({_PROGRAM}, course_id, NULL))   AS enrolled_courses,
+          COUNTIF(is_open_task AND {_PROGRAM})              AS open_tasks,
+          COUNTIF(is_delayed   AND {_PROGRAM})              AS delayed_tasks,
+          COUNTIF(is_failed     AND {_PROGRAM})
+            + COUNTIF(is_coming_due AND {_PROGRAM})         AS program_alerts,
           MIN(assigned_date)                           AS start_date,
           MAX(expected_completion_date)                AS expected_completion
         FROM {_view_fqn()}
-        WHERE LOWER(employee_email) = @email
-          AND apprentice_name IS NOT NULL
+        WHERE {_POP_FILTER}
+          AND LOWER(employee_email) = @email
         GROUP BY employee_id
         LIMIT 1
     """
@@ -533,24 +561,27 @@ def load_program_analytics(supervisor_name: str | None = None) -> list[dict]:
           ANY_VALUE(SUPERVISOR_NAME)                           AS supervisor_name,
           ANY_VALUE(Division)                                  AS division,
           ANY_VALUE(BU)                                        AS bu,
+          ANY_VALUE(org_group)                                 AS org_group,
+          ANY_VALUE(apprentice_year)                           AS apprentice_year,
+          ANY_VALUE(apprentice_year_label)                     AS apprentice_year_label,
 
-          COUNT(DISTINCT course_id)                            AS total_courses,
-          SUM(CAST(is_completed  AS INT64))                    AS completed_courses,
-          SUM(CAST(is_failed     AS INT64))                    AS failed_courses,
-          SUM(CAST(is_delayed    AS INT64))                    AS delayed_courses,
-          SUM(CAST(is_coming_due AS INT64))                    AS coming_due,
+          COUNT(DISTINCT IF({_PROGRAM}, course_id, NULL))                  AS total_courses,
+          COUNT(DISTINCT IF({_PROGRAM} AND is_completed, course_id, NULL)) AS completed_courses,
+          COUNTIF(is_failed     AND {_PROGRAM})                AS failed_courses,
+          COUNTIF(is_delayed    AND {_PROGRAM})                AS delayed_courses,
+          COUNTIF(is_coming_due AND {_PROGRAM})                AS coming_due,
 
-          ROUND(
+          LEAST(ROUND(
             SAFE_DIVIDE(
-              SUM(CAST(is_completed AS INT64)),
-              COUNT(DISTINCT course_id)
+              COUNT(DISTINCT IF({_PROGRAM} AND is_completed, course_id, NULL)),
+              COUNT(DISTINCT IF({_PROGRAM}, course_id, NULL))
             ) * 100, 1
-          )                                                    AS completion_pct,
+          ), 100.0)                                            AS completion_pct,
 
           ROUND(
             SAFE_DIVIDE(
-              SUM(CAST(is_failed AS INT64)),
-              COUNT(DISTINCT course_id)
+              COUNTIF(is_failed AND {_PROGRAM}),
+              COUNT(DISTINCT IF({_PROGRAM}, course_id, NULL))
             ) * 100, 1
           )                                                    AS fail_rate_pct,
 
@@ -559,17 +590,16 @@ def load_program_analytics(supervisor_name: str | None = None) -> list[dict]:
           MAX(expected_completion_date)                        AS expected_completion,
 
           CASE
-            WHEN SUM(CAST(is_failed  AS INT64)) > 0 THEN 'At Risk'
-            WHEN SUM(CAST(is_delayed AS INT64)) > 0 THEN 'Delayed'
-            WHEN SAFE_DIVIDE(
-                   SUM(CAST(is_completed AS INT64)),
-                   COUNT(DISTINCT course_id)
-                 ) = 1.0                                       THEN 'Completed'
+            WHEN COUNTIF(is_failed  AND {_PROGRAM}) > 0 THEN 'At Risk'
+            WHEN COUNTIF(is_delayed AND {_PROGRAM}) > 0 THEN 'Delayed'
+            WHEN COUNT(DISTINCT IF({_PROGRAM}, course_id, NULL)) > 0
+             AND COUNT(DISTINCT IF({_PROGRAM} AND is_completed, course_id, NULL))
+                 = COUNT(DISTINCT IF({_PROGRAM}, course_id, NULL))         THEN 'Completed'
             ELSE 'On Track'
           END                                                  AS status
 
         FROM {_view_fqn()}
-        WHERE apprentice_name IS NOT NULL
+        WHERE {_POP_FILTER}
           {supervisor_filter}
         GROUP BY employee_id
         ORDER BY level, name
@@ -599,13 +629,20 @@ def load_program_analytics(supervisor_name: str | None = None) -> list[dict]:
                 "supervisor_name": row.get("supervisor_name") or "Unknown",
                 "division": row.get("division") or "",
                 "bu": row.get("bu") or "",
+                "org_group": row.get("org_group") or "",
+                "apprentice_year": (
+                    int(row["apprentice_year"])
+                    if pd.notna(row.get("apprentice_year"))
+                    else None
+                ),
+                "apprentice_year_label": row.get("apprentice_year_label") or "",
                 "total_courses": int(row["total_courses"] or 0),
                 "completed_courses": int(row["completed_courses"] or 0),
                 "failed_courses": int(row["failed_courses"] or 0),
                 "delayed_courses": int(row["delayed_courses"] or 0),
                 "coming_due": int(row["coming_due"] or 0),
-                "completion_pct": float(row["completion_pct"] or 0.0),
-                "fail_rate_pct": float(row["fail_rate_pct"] or 0.0),
+                "completion_pct": _safe_float(row["completion_pct"]),
+                "fail_rate_pct": _safe_float(row["fail_rate_pct"]),
                 "start_date": _to_date(row["start_date"]),
                 "completion_date": _to_date(row["completion_date"]),
                 "expected_completion": _to_date(row["expected_completion"]),
@@ -641,7 +678,10 @@ def load_analytics_trend(
 
     filters: list[str] = [
         "completion_date IS NOT NULL",
-        "apprentice_name IS NOT NULL",
+        "is_active_employee = TRUE",
+        "is_in_apprentice_program = TRUE",
+        "UPPER(BU) LIKE '%ELECTRIC%'",
+        "is_program_course = TRUE",
         f"DATE(completion_date) >= DATE_SUB("
         f"(SELECT DATE(MAX(completion_date)) FROM {_view_fqn()}), INTERVAL 5 YEAR)",
     ]

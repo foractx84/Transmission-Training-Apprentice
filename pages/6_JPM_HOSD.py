@@ -1,6 +1,7 @@
 """JPM & HOSD Evaluation Form Submission."""
 import sys
 import logging
+import re
 from pathlib import Path
 from datetime import datetime, date, timezone
 from html import escape
@@ -16,6 +17,9 @@ from app.core.rbac import has_role, ROLE_SUPERVISOR, ROLE_ADMIN
 from app.services.bigquery_service import (
     insert_jpm_evaluation,
     fetch_employee_by_email,
+    fetch_evaluation_codes,
+    fetch_evaluation_questions,
+    insert_communication_log,
 )
 from app.services.analytics_service import load_class_standing
 from app.services.sharepoint_service import (
@@ -26,7 +30,9 @@ from app.services.gcs_service import (
     upload_file_to_gcs,
     list_files_in_gcs_folder,
     download_file_from_gcs,
+    GCSError,
 )
+from app.services.email_service import send_confirmation_email
 from app.core.config import get_config
 
 logger = logging.getLogger(__name__)
@@ -221,6 +227,30 @@ def _pretty_task_name(filename: str) -> str:
     name = filename.rsplit(".", 1)[0]
     return name.replace("_", " ").strip()
 
+def _build_confirmation_email(
+    apprentice_name: str,
+    evaluator_name: str,
+    evaluation_title: str,
+    result: str,
+    evaluation_date: str,
+) -> tuple[str, str]:
+    """Build JPM/HOSD confirmation email subject and body."""
+
+    subject = f"JPM/HOSD Evaluation Completed - {evaluation_title}"
+
+    body = f"""
+A JPM/HOSD evaluation has been submitted.
+
+Apprentice: {apprentice_name}
+Evaluator: {evaluator_name}
+Evaluation: {evaluation_title}
+Result: {result}
+Date: {evaluation_date}
+
+This is a confirmation that the evaluation was completed and recorded.
+"""
+
+    return subject, body
 
 @st.cache_data(ttl=60, show_spinner=False)
 def _list_pdfs(bucket: str) -> list[str]:
@@ -239,6 +269,57 @@ def _lookup_evaluator(email: str) -> dict | None:
     except Exception as e:
         logger.error("Evaluator lookup failed for %s: %s", email, e)
         return None
+
+
+def _norm(text: str | None) -> str:
+    """Normalize for matching: lowercase, non-alphanumerics → single space."""
+    return re.sub(r"[^a-z0-9]+", " ", (text or "").lower()).strip()
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _evaluation_code_index() -> dict[str, str]:
+    """Map normalized evaluation code → real Evaluation_Code"""
+    try:
+        codes = fetch_evaluation_codes()
+    except Exception as e:
+        logger.error("Failed to load evaluation codes: %s", e)
+        return {}
+    return {_norm(c["evaluation_code"]): c["evaluation_code"] for c in codes}
+
+
+def _resolve_evaluation_code(form_filename: str | None) -> str | None:
+    """Match a selected PDF form to an Evaluation_Code.
+
+    The PDF filename is usually 'CODE - Title.pdf' (e.g.
+    'CEAPP TO 1815 HOSD - Framing and Setting a Transmission Pole'), while the
+    table stores only the CODE ('CEAPP TO 1815 HOSD'). So we match the code as
+    a normalized prefix/substring of the filename, taking the longest match.
+    """
+    if not form_filename:
+        return None
+    stem_norm = _norm(form_filename.rsplit(".", 1)[0])
+    index = _evaluation_code_index()  # normalized code → real code
+
+    if stem_norm in index:           # exact match first
+        return index[stem_norm]
+
+    best_norm = best_code = None
+    for norm_code, real_code in index.items():
+        if not norm_code:
+            continue
+        if stem_norm.startswith(norm_code) or norm_code in stem_norm:
+            if best_norm is None or len(norm_code) > len(best_norm):
+                best_norm, best_code = norm_code, real_code
+    return best_code
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _load_questions(evaluation_code: str) -> list[dict]:
+    try:
+        return fetch_evaluation_questions(evaluation_code)
+    except Exception as e:
+        logger.error("Failed to load questions for %s: %s", evaluation_code, e)
+        return []
 
 
 # ── Sync Function ─────────────────────────────────────────────────────────────
@@ -263,8 +344,19 @@ def sync_sharepoint_to_gcs(
             upload_file_to_gcs(gcs_bucket, file_bytes, f["name"])
 
         return True, f"Sync complete — {len(pdf_files)} PDF(s) mirrored to GCS.", len(pdf_files)
+    except GCSError as e:
+        # Storage-layer failure already carries a user-friendly message.
+        return False, str(e), 0
     except Exception as e:
-        return False, f"Sync failed: {e}", 0
+        err = str(e)
+        # Expired / invalid sign-in token → guide the user to re-authenticate
+        # instead of showing the raw Graph API response.
+        if "401" in err or "InvalidAuthenticationToken" in err or "token is expired" in err:
+            return False, (
+                "Your sign-in session has expired. Please refresh the page and "
+                "sign in again, then try syncing once more."
+            ), 0
+        return False, "Sync couldn't complete. Please refresh the page and try again.", 0
 
 
 # ── PDF Preview ───────────────────────────────────────────────────────────────
@@ -322,8 +414,52 @@ def _render_sync_section(config: dict) -> None:
             (st.success if ok else st.error)(msg, icon="✅" if ok else "❌")
 
 
+def _task_nonce() -> int:
+    """Current generation token baked into every per-task widget key.
+
+    Bumping this gives the radios/inputs brand-new widget IDs, so Streamlit
+    discards the values the browser still reports for the old widgets. Deleting
+    the session_state keys alone is NOT enough: the radios have identical params
+    across forms (same key/label/options → same widget ID), so the frontend's
+    stale value is restored after a plain delete. Changing the key is what
+    actually resets them.
+    """
+    return st.session_state.get("form_nonce", 0)
+
+
+def _score_key(idx: int) -> str:
+    return f"score_{_task_nonce()}_{idx}"
+
+
+def _comment_key(idx: int) -> str:
+    return f"task_comment_{_task_nonce()}_{idx}"
+
+
+def _desc_key(idx: int) -> str:
+    return f"task_desc_{_task_nonce()}_{idx}"
+
+
+def _clear_task_scores() -> None:
+    """Reset all per-task score / comment / description widget state.
+
+    Bumps the generation token (so widgets get fresh IDs and the browser's
+    stale values are dropped) and removes the old-generation keys so
+    session_state doesn't accumulate them. Called on form change (see ``main``)
+    and by ``_reset_form``.
+    """
+    per_task_prefixes = ("score_", "task_desc_", "task_comment_")
+    for k in list(st.session_state.keys()):
+        if k.startswith(per_task_prefixes):
+            st.session_state.pop(k, None)
+    st.session_state["form_nonce"] = _task_nonce() + 1
+
+
 def _render_task_selector(gcs_bucket: str) -> str | None:
-    task_files = _list_pdfs(gcs_bucket)
+    try:
+        task_files = _list_pdfs(gcs_bucket)
+    except GCSError as e:
+        st.error(str(e), icon="❌")
+        return None
     if not task_files:
         st.warning("No PDF forms found. Open **SharePoint Sync** above and click Sync.")
         return None
@@ -342,7 +478,11 @@ def _render_pdf_panel(gcs_bucket: str, selected_task: str | None) -> None:
         st.info("Select a form to preview it here.")
         return
 
-    pdf_bytes = _download_pdf(gcs_bucket, selected_task)
+    try:
+        pdf_bytes = _download_pdf(gcs_bucket, selected_task)
+    except GCSError as e:
+        st.error(str(e), icon="❌")
+        return
     with st.container(border=True):
         render_pdf_preview(pdf_bytes)
 
@@ -377,13 +517,24 @@ def _render_apprentice_card(info: dict) -> None:
     )
 
 
-def _render_apprentice_section() -> dict | None:
+def _render_apprentice_section(user_email: str | None, is_admin: bool) -> dict | None:
     st.markdown('<div class="section-header">👤 Apprentice</div>', unsafe_allow_html=True)
 
     apprentices = load_class_standing()
     if not apprentices:
         st.warning("No apprentices available.")
         return None
+
+    # Supervisors may only see/evaluate apprentices on their own team; admins see everyone.
+    if not is_admin:
+        me = (user_email or "").strip().lower()
+        apprentices = [
+            a for a in apprentices
+            if (a.get("supervisor_email") or "").strip().lower() == me
+        ]
+        if not apprentices:
+            st.info("No apprentices are assigned to you.")
+            return None
 
     apprentice_map = {a["id"]: a for a in apprentices}
 
@@ -408,6 +559,8 @@ def _render_apprentice_section() -> dict | None:
         "supervisor_name":  a.get("supervisor_name"),
         "division":         a.get("division"),
         "bu":               a.get("bu"),
+        "email":            a.get("email"),
+        "supervisor_email": a.get("supervisor_email"),
     }
     _render_apprentice_card(info)
     return info
@@ -468,14 +621,93 @@ def _render_evaluation_details() -> tuple[date, str, str, datetime]:
     return evaluation_date, evaluation_type.lower(), form_version, started_at
 
 
-def _render_task_scores() -> list[dict]:
+def _render_task_scores(questions: list[dict] | None = None) -> list[dict]:
+    """
+      * Mode 1: predefined questions exist → auto-load them as read-only tasks.
+      * Mode 2: none found → manual sub-task entry (legacy behavior).
+    """
     st.markdown('<div class="section-header">⭐ Task Scores</div>', unsafe_allow_html=True)
     st.caption(
-        "Describe and rate each sub-task on a 1–5 scale. "
-        "**Every sub-task must score 3 or higher to pass.** "
-        "Sub-tasks scoring below 3 require a comment explaining why."
+        "Score each task 1–5 &nbsp;·&nbsp; "
+        "**1** = Unsatisfactory &nbsp;·&nbsp; **2** = Needs Improvement &nbsp;·&nbsp; "
+        "**3** = Satisfactory / Passing &nbsp;·&nbsp; **4** = Above Expectations &nbsp;·&nbsp; "
+        "**5** = Exceptional. &nbsp; Every task must score 3+ to pass; "
+        "tasks below 3 require a comment."
     )
 
+    if questions:
+        st.caption(f"✅ Auto-loaded {len(questions)} question(s) for this evaluation.")
+        return _render_loaded_questions(questions)
+
+    st.info("No predefined questions for this form — enter tasks manually.")
+    return _render_manual_tasks()
+
+
+def _render_score_and_comment(idx: int) -> tuple[int | None, str]:
+    """Shared score radio + below-3 comment block. Returns (score, comment)."""
+    st.markdown('<div class="readonly-label">Score (1–5)</div>', unsafe_allow_html=True)
+    score = st.radio(
+        f"Task {idx} score",
+        options=[1, 2, 3, 4, 5],
+        horizontal=True,
+        index=None,
+        key=_score_key(idx),
+        label_visibility="collapsed",
+    )
+    comment = ""
+    if score is not None and score < 3:
+        st.markdown(
+            '<div style="color:#fc8181; font-size:0.8rem; margin-top:0.4rem;">'
+            '⚠ Comment required — explain why this task scored below 3</div>',
+            unsafe_allow_html=True,
+        )
+        comment = st.text_area(
+            f"Task {idx} failure comment",
+            key=_comment_key(idx),
+            placeholder="Why did the apprentice score below 3 on this task?",
+            height=80,
+            label_visibility="collapsed",
+        )
+    return score, (comment or "").strip()
+
+
+def _render_loaded_questions(questions: list[dict]) -> list[dict]:
+    """Mode 1 — one read-only scoring row per predefined question."""
+    tasks: list[dict] = []
+    current_section = None
+    for idx, q in enumerate(questions, start=1):
+        section = (q.get("section_name") or "").strip()
+        if section and section != current_section:
+            st.markdown(f'<div class="section-header">{escape(section)}</div>', unsafe_allow_html=True)
+            current_section = section
+
+        with st.container(border=True):
+            score_val = st.session_state.get(_score_key(idx))
+            header = f"Task {idx}"
+            if score_val is not None and score_val < 3:
+                header += " &nbsp;<span style='color:#fc8181;'>⚠ Fail</span>"
+            st.markdown(f'<div class="score-row-label">{header}</div>', unsafe_allow_html=True)
+
+            st.markdown('<div class="readonly-label">Task / Question</div>', unsafe_allow_html=True)
+            st.markdown(
+                f'<div class="readonly-field">{escape(q.get("question_text") or "—")}</div>',
+                unsafe_allow_html=True,
+            )
+
+            score, comment = _render_score_and_comment(idx)
+            tasks.append({
+                "task_index":       idx,
+                "task_description": (q.get("question_text") or "").strip(),
+                "score":            score,
+                "comment":          comment,
+                "question_id":      q.get("question_id"),
+                "section_name":     section,
+            })
+    return tasks
+
+
+def _render_manual_tasks() -> list[dict]:
+    """Mode 2 — legacy manual sub-task entry."""
     c_count, _ = st.columns([1, 4])
     with c_count:
         num_tasks = st.number_input(
@@ -487,58 +719,29 @@ def _render_task_scores() -> list[dict]:
     tasks: list[dict] = []
     for idx in range(1, num_tasks + 1):
         with st.container(border=True):
-            score_val = st.session_state.get(f"score_{idx}")
-            is_failing = score_val is not None and score_val < 3
-
+            score_val = st.session_state.get(_score_key(idx))
             header = f"Sub-Task {idx}"
-            if is_failing:
+            if score_val is not None and score_val < 3:
                 header += " &nbsp;<span style='color:#fc8181;'>⚠ Fail</span>"
-            st.markdown(
-                f'<div class="score-row-label">{header}</div>',
-                unsafe_allow_html=True,
-            )
+            st.markdown(f'<div class="score-row-label">{header}</div>', unsafe_allow_html=True)
 
             c_desc, c_score = st.columns([3, 2], gap="large")
             with c_desc:
                 st.markdown('<div class="readonly-label">Description</div>', unsafe_allow_html=True)
                 description = st.text_input(
                     f"Sub-Task {idx} description",
-                    key=f"task_desc_{idx}",
+                    key=_desc_key(idx),
                     placeholder=f"Describe sub-task {idx} (e.g. “Set up grounds on conductor”)",
                     label_visibility="collapsed",
                 )
             with c_score:
-                st.markdown('<div class="readonly-label">Score (1–5)</div>', unsafe_allow_html=True)
-                score = st.radio(
-                    f"Sub-Task {idx} score",
-                    options=[1, 2, 3, 4, 5],
-                    horizontal=True,
-                    index=None,
-                    key=f"score_{idx}",
-                    label_visibility="collapsed",
-                )
-
-            comment = ""
-            if score is not None and score < 3:
-                st.markdown(
-                    '<div style="color:#fc8181; font-size:0.8rem; margin-top:0.4rem;">'
-                    '⚠ Comment required — explain why this sub-task scored below 3'
-                    '</div>',
-                    unsafe_allow_html=True,
-                )
-                comment = st.text_area(
-                    f"Sub-Task {idx} failure comment",
-                    key=f"task_comment_{idx}",
-                    placeholder="Why did the apprentice score below 3 on this sub-task?",
-                    height=80,
-                    label_visibility="collapsed",
-                )
+                score, comment = _render_score_and_comment(idx)
 
             tasks.append({
                 "task_index":       idx,
                 "task_description": description.strip(),
                 "score":            score,
-                "comment":          (comment or "").strip(),
+                "comment":          comment,
             })
     return tasks
 
@@ -584,10 +787,9 @@ def _reset_form() -> None:
         "evaluation_type", "form_version", "selected_task", "num_tasks",
         "sync_result",
     }
-    per_task_prefixes = ("score_", "task_desc_", "task_comment_")
-    for k in list(st.session_state.keys()):
-        if k in keys_to_clear or k.startswith(per_task_prefixes):
-            st.session_state.pop(k, None)
+    for k in keys_to_clear:
+        st.session_state.pop(k, None)
+    _clear_task_scores()
 
 
 def _validate_tasks(tasks: list[dict]) -> list[str]:
@@ -618,16 +820,71 @@ def _merge_failure_comments(eval_comments: str, tasks: list[dict]) -> str:
     return f"{eval_comments}\n\n{section}" if eval_comments.strip() else section
 
 
-def _submit_evaluation(payload: dict, tasks: list[dict]) -> None:
+def _send_and_log_confirmations(ctx: dict) -> list[str]:
+    """Email the apprentice + supervisor and log every attempt.
+
+    Never raises: a failed email or log must not undo a saved evaluation.
+    Returns human-readable status lines to show the evaluator.
+    """
+    subject, body = _build_confirmation_email(
+        apprentice_name=ctx.get("apprentice_name") or "—",
+        evaluator_name=ctx.get("evaluator_name") or "—",
+        evaluation_title=ctx.get("evaluation_title") or "—",
+        result=ctx.get("result") or "—",
+        evaluation_date=ctx.get("evaluation_date") or "—",
+    )
+
+    messages: list[str] = []
+    for recipient_type, email in (
+        ("apprentice", ctx.get("apprentice_email")),
+        ("supervisor", ctx.get("supervisor_email")),
+    ):
+        if email:
+            ok, err = send_confirmation_email(email, subject, body)
+            status = "SENT" if ok else "FAILED"
+        else:
+            err, status = "No email on file", "SKIPPED"
+
+        try:
+            insert_communication_log(
+                evaluation_id=ctx["evaluation_id"],
+                apprentice_id=ctx["apprentice_id"],
+                apprentice_email=ctx.get("apprentice_email"),
+                supervisor_email=ctx.get("supervisor_email"),
+                recipient_email=email,
+                recipient_type=recipient_type,
+                email_type="JPM_HOSD_CONFIRMATION",
+                subject=subject,
+                status=status,
+                error_message=None if status == "SENT" else err,
+            )
+        except Exception as e:  # logging must not break submission
+            logger.error("Communication log insert failed (%s): %s", recipient_type, e)
+
+        if status == "SENT":
+            messages.append(f"📧 Confirmation sent to {recipient_type} ({email}).")
+        elif status == "SKIPPED":
+            messages.append(f"⚠️ No {recipient_type} email on file — skipped.")
+        else:
+            messages.append(f"❌ Email to {recipient_type} failed: {err}")
+    return messages
+
+
+def _submit_evaluation(payload: dict, tasks: list[dict], email_ctx: dict | None = None) -> None:
     with st.spinner("Submitting evaluation…"):
         ok, err = insert_jpm_evaluation(evaluation=payload, tasks=tasks)
-    if ok:
-        st.success("Evaluation submitted successfully!", icon="✅")
-        st.balloons()
-        _reset_form()
-        st.rerun()
-    else:
+    if not ok:
         st.error(f"Submission failed: {err}", icon="❌")
+        return
+
+    flash = ["✅ Evaluation submitted successfully!"]
+    if email_ctx:
+        flash += _send_and_log_confirmations(email_ctx)
+
+    # Persist the result across the reset/rerun so the evaluator can read it.
+    st.session_state["submit_flash"] = flash
+    _reset_form()
+    st.rerun()
 
 
 # ── Main Page ─────────────────────────────────────────────────────────────────
@@ -636,9 +893,14 @@ def main() -> None:
     auth = require_auth()
     user_info = render_sidebar(auth)
 
-    if not (has_role(auth, ROLE_SUPERVISOR) or has_role(auth, ROLE_ADMIN)):
+    is_admin = has_role(auth, ROLE_ADMIN)
+    if not (has_role(auth, ROLE_SUPERVISOR) or is_admin):
         st.error("🚫 Access Denied — This page is for supervisors and admins only.")
         st.stop()
+
+    current_user_email = (
+        user_info.get("mail") or user_info.get("userPrincipalName") or ""
+    )
 
     _inject_styles()
 
@@ -657,6 +919,14 @@ def main() -> None:
     st.title("📝 JPM & HOSD Evaluation")
     st.caption("Submit a Job Performance Measure or HOSD evaluation record.")
 
+    # Show the post-submit summary (survives the form reset/rerun).
+    flash = st.session_state.pop("submit_flash", None)
+    if flash:
+        st.success(flash[0])
+        for line in flash[1:]:
+            st.caption(line)
+        st.balloons()
+
     _render_sync_section(config)
 
     st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
@@ -669,13 +939,21 @@ def main() -> None:
         _render_pdf_panel(gcs_bucket, selected_task)
 
     with col_form:
-        apprentice_info = _render_apprentice_section()
+        apprentice_info = _render_apprentice_section(current_user_email, is_admin)
         evaluator_emp_id, evaluator_name = _render_evaluator_section(user_info)
         evaluation_date, evaluation_type, form_version, started_at = _render_evaluation_details()
 
     # ── Full-width below the 2-col section ──────────────────────────────────
     st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
-    scores = _render_task_scores()
+
+    # Reset per-task scores when the form changes. 
+    if st.session_state.get("_scored_for_task") != selected_task:
+        _clear_task_scores()
+        st.session_state["_scored_for_task"] = selected_task
+
+    evaluation_code = _resolve_evaluation_code(selected_task)
+    questions = _load_questions(evaluation_code) if evaluation_code else []
+    scores = _render_task_scores(questions)
 
     st.markdown('<div class="section-header">📝 Comments</div>', unsafe_allow_html=True)
     comments = st.text_area(
@@ -707,6 +985,11 @@ def main() -> None:
         errors: list[str] = []
         if not apprentice_info:
             errors.append("Select an apprentice.")
+        elif not is_admin and (
+            (apprentice_info.get("supervisor_email") or "").strip().lower()
+            != current_user_email.strip().lower()
+        ):
+            errors.append("You are not authorized to evaluate this apprentice.")
         if not selected_task:
             errors.append("Select an Evaluation Form.")
         errors.extend(_validate_tasks(scores))
@@ -749,7 +1032,23 @@ def main() -> None:
             "ident": None,
             "performance_objective": None,
         }
-        _submit_evaluation(payload, task_rows)
+
+        evaluation_title = (
+            questions[0].get("evaluation_title")
+            if questions else _pretty_task_name(selected_task)
+        )
+        email_ctx = {
+            "evaluation_id":    evaluation_id,
+            "apprentice_id":    apprentice_info["employee_id"],
+            "apprentice_name":  apprentice_info.get("name"),
+            "apprentice_email": apprentice_info.get("email"),
+            "supervisor_email": apprentice_info.get("supervisor_email"),
+            "evaluator_name":   evaluator_name,
+            "evaluation_title": evaluation_title,
+            "result":           result,
+            "evaluation_date":  evaluation_date.isoformat(),
+        }
+        _submit_evaluation(payload, task_rows, email_ctx)
 
 
 main()

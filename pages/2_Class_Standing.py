@@ -80,7 +80,8 @@ def _render_apprenticeship_level(df: pd.DataFrame) -> None:
     )
 
     for _, row in level_summary.iterrows():
-        pct = round(float(row["avg_pct"]), 1)
+        avg_pct = row["avg_pct"]
+        pct = round(float(avg_pct), 1) if pd.notna(avg_pct) else 0.0  # NaN-safe
         pct_clamped = min(max(pct / 100, 0.0), 1.0)  # ← clamp to [0.0, 1.0]
         st.markdown(f"**{row['level']}** — {int(row['count'])} apprentices")
         st.progress(pct_clamped, text=f"{pct}% avg completion")

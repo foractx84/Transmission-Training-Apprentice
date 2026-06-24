@@ -67,9 +67,10 @@ def main():
         pages.append(st.Page("pages/6_JPM_HOSD.py",
                              title="JPM & HOSD",        icon="📝"))
 
-    if has_role(auth, ROLE_ADMIN):
-        pages.append(st.Page("pages/5_Security_Admin.py",
-                             title="Security Admin",    icon="🔐"))
+    # Security Admin page hidden from UI for now
+    # if has_role(auth, ROLE_ADMIN):
+    #     pages.append(st.Page("pages/5_Security_Admin.py",
+    #                          title="Security Admin",    icon="🔐"))
 
     if not pages:
         st.error("⚠️ No roles assigned to your account.")
