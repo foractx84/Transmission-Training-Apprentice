@@ -1,8 +1,9 @@
 """Program Analytics page — cohort-level analytics and insights."""
+
+import logging
 import sys
 from pathlib import Path
 from html import escape
-from datetime import date
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -26,8 +27,11 @@ from app.utils.org_groups import (
     classify_business_group,
 )
 
+logger = logging.getLogger(__name__)
+
 
 # ── Styles ────────────────────────────────────────────────────────────────────
+
 
 def _inject_styles() -> None:
     st.markdown(
@@ -121,6 +125,7 @@ def _inject_styles() -> None:
 
 # ── KPI Cards ─────────────────────────────────────────────────────────────────
 
+
 def _kpi_card(label: str, value: str, alert: bool = False) -> None:
     alert_class = "kpi-alert" if alert else ""
     st.markdown(
@@ -138,29 +143,29 @@ def _render_kpis(df: pd.DataFrame) -> None:
     c1, c2, c3, c4, c5 = st.columns(5)
 
     clickable = [
-        (c1, "Program Alerts", "coming_due",     "alerts"),
-        (c2, "Program Fails",  "failed_courses", "fails"),
-        (c3, "Active Delays",  "delayed_courses", "delays"),
+        (c1, "Program Alerts", "coming_due", "alerts"),
+        (c2, "Program Fails", "failed_courses", "fails"),
+        (c3, "Active Delays", "delayed_courses", "delays"),
     ]
     for col, label, value_col, drill_key in clickable:
         total = int(df[value_col].sum()) if not df.empty else 0
         with col:
             _kpi_card(label, str(total), alert=total > 0)
-            # 4.1–4.3 — whole card is clickable: this button is made transparent
-            # and pulled up over the card via CSS (.st-key-kpi_card_* in _inject_styles).
             if st.button(
                 f"Open {label}", key=f"kpi_card_{drill_key}", use_container_width=True
             ):
                 # Toggle: click the same card again to close.
                 st.session_state.kpi_drill = (
-                    None if st.session_state.get("kpi_drill") == drill_key else drill_key
+                    None
+                    if st.session_state.get("kpi_drill") == drill_key
+                    else drill_key
                 )
 
     with c4:
         avg = round(df["completion_pct"].mean(), 1) if not df.empty else 0.0
         _kpi_card("Overall Completion", f"{avg}%")
     with c5:
-        _kpi_card("Financial Impact", "Placeholder")
+        _kpi_card("Financial Impact", "000")
 
     _render_kpi_drilldown(df)
 
@@ -172,30 +177,36 @@ def _render_kpi_drilldown(df: pd.DataFrame) -> None:
         return
 
     if drill == "alerts":
-        title   = "🔔 Program Alerts — coming due"
+        title = "🔔 Program Alerts — coming due"
         caption = "Included because a recert or assignment is coming due."
-        sub     = df[df["coming_due"] > 0]
-        cols    = {
-            "name": "Apprentice", "supervisor_name": "Supervisor",
-            "coming_due": "Coming Due", "expected_completion": "Expected Completion",
+        sub = df[df["coming_due"] > 0]
+        cols = {
+            "name": "Apprentice",
+            "supervisor_name": "Supervisor",
+            "coming_due": "Coming Due",
+            "expected_completion": "Expected Completion",
             "status": "Status",
         }
     elif drill == "fails":
-        title   = "❌ Program Fails"
+        title = "❌ Program Fails"
         caption = "Apprentices with one or more failed courses."
-        sub     = df[df["failed_courses"] > 0]
-        cols    = {
-            "name": "Apprentice", "supervisor_name": "Supervisor",
-            "failed_courses": "Failed Courses", "fail_rate_pct": "Fail Rate %",
+        sub = df[df["failed_courses"] > 0]
+        cols = {
+            "name": "Apprentice",
+            "supervisor_name": "Supervisor",
+            "failed_courses": "Failed Courses",
+            "fail_rate_pct": "Fail Rate %",
             "status": "Status",
         }
     else:  # delays
-        title   = "⏳ Active Delays"
+        title = "⏳ Active Delays"
         caption = "Apprentices with one or more delayed tasks."
-        sub     = df[df["delayed_courses"] > 0]
-        cols    = {
-            "name": "Apprentice", "supervisor_name": "Supervisor",
-            "delayed_courses": "Delayed Tasks", "expected_completion": "Expected Completion",
+        sub = df[df["delayed_courses"] > 0]
+        cols = {
+            "name": "Apprentice",
+            "supervisor_name": "Supervisor",
+            "delayed_courses": "Delayed Tasks",
+            "expected_completion": "Expected Completion",
             "status": "Status",
         }
 
@@ -217,6 +228,7 @@ def _render_kpi_drilldown(df: pd.DataFrame) -> None:
 
 # ── Plotly chart helper ───────────────────────────────────────────────────────
 
+
 def _dark_layout(fig: go.Figure, height: int = 350) -> go.Figure:
     fig.update_layout(
         plot_bgcolor="#0e1117",
@@ -231,12 +243,12 @@ def _dark_layout(fig: go.Figure, height: int = 350) -> go.Figure:
 
 
 def _abbr(text: str) -> str:
-    """3.5 — shorten verbose labels so chart axes/legends/headers fit on screen
-    without horizontal scrolling (e.g. '1st Year Apprentice' → '1st Year Appr.')."""
+    """Apprentice -> Appr., Supervisor -> Sup., etc."""
     return text.replace("Apprentices", "Appr.").replace("Apprentice", "Appr.")
 
 
 # ── Section: Trend ────────────────────────────────────────────────────────────
+
 
 def _render_trend(
     trend_data: list[dict],
@@ -260,60 +272,85 @@ def _render_trend(
         return
 
     fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=trend_df["month"], y=trend_df["completions"],
-        mode="lines+markers", name="Completions",
-        line=dict(color="#63b3ed", width=2), marker=dict(size=6),
-    ))
-    fig.add_trace(go.Scatter(
-        x=trend_df["month"], y=trend_df["failures"],
-        mode="lines+markers", name="Failures",
-        line=dict(color="#fc8181", width=2), marker=dict(size=6),
-    ))
-    fig.add_trace(go.Scatter(
-        x=trend_df["month"], y=trend_df["delays"],
-        mode="lines+markers", name="Delays",
-        line=dict(color="#f6ad55", width=2), marker=dict(size=6),
-    ))
+    fig.add_trace(
+        go.Scatter(
+            x=trend_df["month"],
+            y=trend_df["completions"],
+            mode="lines+markers",
+            name="Completions",
+            line=dict(color="#63b3ed", width=2),
+            marker=dict(size=6),
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=trend_df["month"],
+            y=trend_df["failures"],
+            mode="lines+markers",
+            name="Failures",
+            line=dict(color="#fc8181", width=2),
+            marker=dict(size=6),
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=trend_df["month"],
+            y=trend_df["delays"],
+            mode="lines+markers",
+            name="Delays",
+            line=dict(color="#f6ad55", width=2),
+            marker=dict(size=6),
+        )
+    )
     fig.update_layout(
-        plot_bgcolor="#0e1117", paper_bgcolor="#0e1117", font_color="#e2e8f0",
+        plot_bgcolor="#0e1117",
+        paper_bgcolor="#0e1117",
+        font_color="#e2e8f0",
         showlegend=True,
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
         xaxis=dict(showgrid=False),
         yaxis=dict(showgrid=True, gridcolor="#2d3748"),
         margin=dict(l=0, r=0, t=10, b=0),
-        hovermode="x unified", height=350,
+        hovermode="x unified",
+        height=350,
     )
     st.plotly_chart(fig, use_container_width=True)
 
 
 # ── Section: Pass/Fail donut ──────────────────────────────────────────────────
 
+
 def _render_pass_fail(df: pd.DataFrame) -> None:
     if df.empty:
         return
 
-    fig = go.Figure(go.Pie(
-        labels=["Completed", "Failed", "Delayed", "Coming Due"],
-        values=[
-            int(df["completed_courses"].sum()),
-            int(df["failed_courses"].sum()),
-            int(df["delayed_courses"].sum()),
-            int(df["coming_due"].sum()),
-        ],
-        hole=0.5,
-        marker_colors=["#68d391", "#fc8181", "#f6ad55", "#63b3ed"],
-    ))
+    fig = go.Figure(
+        go.Pie(
+            labels=["Completed", "Failed", "Delayed", "Coming Due"],
+            values=[
+                int(df["completed_courses"].sum()),
+                int(df["failed_courses"].sum()),
+                int(df["delayed_courses"].sum()),
+                int(df["coming_due"].sum()),
+            ],
+            hole=0.5,
+            marker_colors=["#68d391", "#fc8181", "#f6ad55", "#63b3ed"],
+        )
+    )
     fig.update_layout(
-        plot_bgcolor="#0e1117", paper_bgcolor="#0e1117", font_color="#e2e8f0",
+        plot_bgcolor="#0e1117",
+        paper_bgcolor="#0e1117",
+        font_color="#e2e8f0",
         showlegend=True,
         legend=dict(orientation="h", yanchor="bottom", y=-0.2),
-        margin=dict(l=0, r=0, t=10, b=40), height=350,
+        margin=dict(l=0, r=0, t=10, b=40),
+        height=350,
     )
     st.plotly_chart(fig, use_container_width=True)
 
 
-# ── Section: Completion by Apprentice Year ───────────────────────────────────
+# ── Section: Completion by Apprentice Year ──────────────────────────────────────────────
+
 
 def _render_completion_by_year(df: pd.DataFrame) -> None:
     if df.empty:
@@ -326,49 +363,61 @@ def _render_completion_by_year(df: pd.DataFrame) -> None:
         )
         return
 
-    no_year_mask = (
-        df["apprentice_year"].isna()
-        | df["apprentice_year_label"].fillna("").str.strip().isin(["", "Unknown"])
-    )
+    no_year_mask = df["apprentice_year"].isna() | df["apprentice_year_label"].fillna(
+        ""
+    ).str.strip().isin(["", "Unknown"])
     no_year_count = int(no_year_mask.sum())
 
     year_df = (
-        df[~no_year_mask]
-        .groupby(["apprentice_year", "apprentice_year_label"], as_index=False)["completion_pct"]
+        df.dropna(subset=["apprentice_year"])  # drop Unknown/null years
+        .groupby(["apprentice_year", "apprentice_year_label"], as_index=False)[
+            "completion_pct"
+        ]
         .mean()
-        .sort_values("apprentice_year")                       # 1st → 4th order
-        .rename(columns={"completion_pct": "Avg Completion %",
-                         "apprentice_year_label": "Year"})
+        .sort_values("apprentice_year")  # 1st → 4th order
+        .rename(
+            columns={
+                "completion_pct": "Avg Completion %",
+                "apprentice_year_label": "Year",
+            }
+        )
     )
     if year_df.empty:
         st.info("No apprentice-year values for the current filters.")
         return
 
     fig = px.bar(
-        year_df, x="Year", y="Avg Completion %",              # vertical columns
-        color="Avg Completion %", color_continuous_scale="Blues",
+        year_df,
+        x="Year",
+        y="Avg Completion %",  # vertical columns
+        color="Avg Completion %",
+        color_continuous_scale="Blues",
         range_y=[0, 100],
         text=year_df["Avg Completion %"].apply(lambda v: f"{v:.1f}%"),
     )
     fig.update_traces(textposition="outside")
-    fig.update_xaxes(title_text="", tickangle=0)              # short labels, no scroll
+    fig.update_xaxes(title_text="", tickangle=0)
     st.plotly_chart(_dark_layout(fig), use_container_width=True)
 
     if no_year_count:
-        st.caption(f"⚠️ {no_year_count} apprentice(s) have no assigned year (excluded above).")
+        st.caption(
+            f"⚠️ {no_year_count} apprentice(s) have no assigned year (excluded above)."
+        )
 
 
 # ── Helper: row-level Division/BU fallback ──────────────────────────────────
+
 
 def _division_or_bu(df: pd.DataFrame) -> pd.Series:
     """Per-row Division/BU label — uses division when present, else bu.
     Empty/whitespace strings are treated as missing."""
     division = df["division"].replace(r"^\s*$", pd.NA, regex=True)
-    bu       = df["bu"].replace(r"^\s*$", pd.NA, regex=True)
+    bu = df["bu"].replace(r"^\s*$", pd.NA, regex=True)
     return division.fillna(bu)
 
 
 # ── Section: Completion by Division/BU ───────────────────────────────────────
+
 
 def _render_completion_by_division(df: pd.DataFrame) -> None:
     if df.empty:
@@ -379,14 +428,20 @@ def _render_completion_by_division(df: pd.DataFrame) -> None:
     div_df["Division/BU"] = _division_or_bu(div_df)
     div_df = (
         div_df.dropna(subset=["Division/BU"])
-              .groupby("Division/BU")["completion_pct"].mean().reset_index()
-              .rename(columns={"completion_pct": "Avg Completion %"})
-              .sort_values("Avg Completion %", ascending=True)
+        .groupby("Division/BU")["completion_pct"]
+        .mean()
+        .reset_index()
+        .rename(columns={"completion_pct": "Avg Completion %"})
+        .sort_values("Avg Completion %", ascending=True)
     )
     fig = px.bar(
-        div_df, x="Avg Completion %", y="Division/BU",
-        orientation="h", color="Avg Completion %",
-        color_continuous_scale="Teal", range_x=[0, 100],
+        div_df,
+        x="Avg Completion %",
+        y="Division/BU",
+        orientation="h",
+        color="Avg Completion %",
+        color_continuous_scale="Teal",
+        range_x=[0, 100],
         text=div_df["Avg Completion %"].apply(lambda v: f"{v:.1f}%"),
     )
     fig.update_traces(textposition="outside")
@@ -394,6 +449,7 @@ def _render_completion_by_division(df: pd.DataFrame) -> None:
 
 
 # ── Section: Completion by Supervisor — paginated table ───────────────────────
+
 
 def _render_supervisor_table(df: pd.DataFrame) -> None:
     st.markdown("##### Supervisor Summary")
@@ -414,46 +470,89 @@ def _render_supervisor_table(df: pd.DataFrame) -> None:
         .sort_values("avg_completion", ascending=False)
     )
     sup_df["avg_completion"] = sup_df["avg_completion"].apply(lambda v: f"{v:.1f}%")
-    sup_df["at_risk"]        = sup_df["at_risk"].astype(int)
-    sup_df["delayed"]        = sup_df["delayed"].astype(int)
-    sup_df.columns           = ["Supervisor", "Avg Completion %", _abbr("# Apprentices"), "At Risk", "Delayed"]
+    sup_df["at_risk"] = sup_df["at_risk"].astype(int)
+    sup_df["delayed"] = sup_df["delayed"].astype(int)
+    sup_df.columns = [
+        "Supervisor",
+        "Avg Completion %",
+        _abbr("# Apprentices"),
+        "At Risk",
+        "Delayed",
+    ]
 
     # Paginate — 10 rows per page
     page_size = 10
     total_pages = max(1, -(-len(sup_df) // page_size))  # ceil division
-    page = st.number_input("Page", min_value=1, max_value=total_pages, value=1, step=1, key="sup_page")
+    page = st.number_input(
+        "Page", min_value=1, max_value=total_pages, value=1, step=1, key="sup_page"
+    )
     start = (page - 1) * page_size
-    st.dataframe(sup_df.iloc[start : start + page_size], use_container_width=True, hide_index=True)
-    st.caption(f"Showing {start + 1}–{min(start + page_size, len(sup_df))} of {len(sup_df)} supervisors")
+    st.dataframe(
+        sup_df.iloc[start : start + page_size],
+        use_container_width=True,
+        hide_index=True,
+    )
+    st.caption(
+        f"Showing {start + 1}–{min(start + page_size, len(sup_df))} of {len(sup_df)} supervisors"
+    )
 
 
 # ── Section: At Risk — paginated table ───────────────────────────────────────
 
+
 def _render_at_risk_table(df: pd.DataFrame) -> None:
     st.markdown("##### Individual Apprentice Details")
-    at_risk = df[df["status"] == "At Risk"].sort_values("failed_courses", ascending=False)
+    at_risk = df[df["status"] == "At Risk"].sort_values(
+        "failed_courses", ascending=False
+    )
 
     if at_risk.empty:
         st.success("✅ No at-risk apprentices.")
         return
 
-    display = at_risk[["name", "level", "supervisor_name", "division",
-        "completion_pct", "failed_courses", "delayed_courses"]].copy()
+    display = at_risk[
+        [
+            "name",
+            "level",
+            "supervisor_name",
+            "division",
+            "completion_pct",
+            "failed_courses",
+            "delayed_courses",
+        ]
+    ].copy()
     display["completion_pct"] = display["completion_pct"].apply(lambda v: f"{v:.1f}%")
-    display["failed_courses"]  = display["failed_courses"].astype(int)
+    display["failed_courses"] = display["failed_courses"].astype(int)
     display["delayed_courses"] = display["delayed_courses"].astype(int)
-    display.columns = ["Name", "Level", "Supervisor", "Division", "Completion %", "Failed", "Delayed"]
+    display.columns = [
+        "Name",
+        "Level",
+        "Supervisor",
+        "Division",
+        "Completion %",
+        "Failed",
+        "Delayed",
+    ]
 
     # Paginate — 10 rows per page
     page_size = 10
     total_pages = max(1, -(-len(display) // page_size))
-    page = st.number_input("Page", min_value=1, max_value=total_pages, value=1, step=1, key="risk_page")
+    page = st.number_input(
+        "Page", min_value=1, max_value=total_pages, value=1, step=1, key="risk_page"
+    )
     start = (page - 1) * page_size
-    st.dataframe(display.iloc[start : start + page_size], use_container_width=True, hide_index=True)
-    st.caption(f"Showing {start + 1}–{min(start + page_size, len(display))} of {len(display)} at-risk apprentices")
+    st.dataframe(
+        display.iloc[start : start + page_size],
+        use_container_width=True,
+        hide_index=True,
+    )
+    st.caption(
+        f"Showing {start + 1}–{min(start + page_size, len(display))} of {len(display)} at-risk apprentices"
+    )
 
 
 # ── Section: Training Forms — read-only JPM viewer ───────────────────────────
+
 
 def _field(label: str, value: str) -> None:
     st.markdown(
@@ -461,6 +560,7 @@ def _field(label: str, value: str) -> None:
         f'<div class="form-field-value">{escape(str(value or "—"))}</div>',
         unsafe_allow_html=True,
     )
+
 
 def _render_readonly_form(ev: dict) -> None:
     st.markdown('<div class="form-section">', unsafe_allow_html=True)
@@ -520,14 +620,30 @@ def _render_readonly_form(ev: dict) -> None:
     with c2:
         _field("Submitted At", str(ev.get("submitted_at", "")))
 
-    st.markdown('</div>', unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
 
-def _render_training_forms(supervisor_name: str | None) -> None:
-    st.markdown('<div class="section-header">📄 Documentation & Audit Analytics — JPM & HOSD Records</div>', unsafe_allow_html=True)
+
+def _render_training_forms(employee_ids: tuple[str, ...] | None) -> None:
+    """
+    Render the JPM/HOSD evaluation viewer.
+
+    Args:
+        employee_ids: Apprentice scope for supervisor-only users (their team).
+            Pass None for admins/auditors to see all evaluations.
+    """
+    st.markdown(
+        '<div class="section-header">📄 Documentation & Audit Analytics — JPM & HOSD Records</div>',
+        unsafe_allow_html=True,
+    )
     st.markdown("---")
 
-    with st.spinner("Loading courses…"):
-        courses = fetch_distinct_course_names(supervisor_name)
+    try:
+        with st.spinner("Loading courses…"):
+            courses = fetch_distinct_course_names(employee_ids=employee_ids)
+    except Exception as e:
+        logger.error("fetch_distinct_course_names failed: %s", e)
+        st.error("Could not load evaluation records. Please try again later.")
+        return
 
     if not courses:
         st.info("No evaluation records found.")
@@ -543,15 +659,25 @@ def _render_training_forms(supervisor_name: str | None) -> None:
     if selected_course_name == "— Select a course —":
         return
 
-    with st.spinner("Loading evaluations…"):
-        evaluations = fetch_evaluation_ids_for_course(selected_course_name, supervisor_name)
+    try:
+        with st.spinner("Loading evaluations…"):
+            evaluations = fetch_evaluation_ids_for_course(
+                selected_course_name,
+                employee_ids=employee_ids,
+            )
+    except Exception as e:
+        logger.error("fetch_evaluation_ids_for_course failed: %s", e)
+        st.error("Could not load evaluations for this course. Please try again later.")
+        return
 
     if not evaluations:
         st.info("No evaluations found for this course.")
         return
 
     eval_options = {
-        f"{e['evaluation_date']} | Apprentice {e['apprentice_id']} | {e['result']}": e["evaluation_id"]
+        f"{e['evaluation_date']} | Apprentice {e['apprentice_id']} | {e['result']}": e[
+            "evaluation_id"
+        ]
         for e in evaluations
     }
     selected_eval_label = st.selectbox(
@@ -563,8 +689,13 @@ def _render_training_forms(supervisor_name: str | None) -> None:
     if selected_eval_label == "— Select an evaluation —":
         return
 
-    with st.spinner("Loading form…"):
-        ev = fetch_evaluation_by_id(eval_options[selected_eval_label])
+    try:
+        with st.spinner("Loading form…"):
+            ev = fetch_evaluation_by_id(eval_options[selected_eval_label])
+    except Exception as e:
+        logger.error("fetch_evaluation_by_id failed: %s", e)
+        st.error("Could not load the evaluation form. Please try again later.")
+        return
 
     if not ev:
         st.error("Could not load evaluation. Please try again.")
@@ -573,10 +704,15 @@ def _render_training_forms(supervisor_name: str | None) -> None:
     st.markdown("<br>", unsafe_allow_html=True)
     _render_readonly_form(ev)
 
+
 # ── Section: Financial Analytics (Placeholder) ────────────────────────────────
 
+
 def _render_financial_analytics() -> None:
-    st.markdown('<div class="section-header">💰 Financial Analytics</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="section-header">💰 Financial Analytics</div>',
+        unsafe_allow_html=True,
+    )
     st.markdown("---")
     st.markdown(
         """
@@ -593,10 +729,15 @@ def _render_financial_analytics() -> None:
         unsafe_allow_html=True,
     )
 
+
 # ── Section: Detailed Table ───────────────────────────────────────────────────
 
+
 def _render_table(df: pd.DataFrame) -> None:
-    st.markdown('<div class="section-header">📋 Detailed Breakdown</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="section-header">📋 Detailed Breakdown</div>',
+        unsafe_allow_html=True,
+    )
     st.markdown("---")
 
     if df.empty:
@@ -604,39 +745,56 @@ def _render_table(df: pd.DataFrame) -> None:
         return
 
     status_icons = {
-        "On Track":  "🟢 On Track",
-        "Delayed":   "🟡 Delayed",
-        "At Risk":   "🔴 At Risk",
+        "On Track": "🟢 On Track",
+        "Delayed": "🟡 Delayed",
+        "At Risk": "🔴 At Risk",
         "Completed": "🔵 Completed",
     }
 
-    display = df[[                          # ← fixed: [[ not [{
-        "name", "level", "supervisor_name", "division",
-        "completion_pct", "fail_rate_pct", "status",
-        "delayed_courses", "expected_completion",
-    ]].copy()
+    display = df[
+        [  # ← fixed: [[ not [{
+            "name",
+            "level",
+            "supervisor_name",
+            "division",
+            "completion_pct",
+            "fail_rate_pct",
+            "status",
+            "delayed_courses",
+            "expected_completion",
+        ]
+    ].copy()
 
-    display["status"]              = display["status"].map(status_icons).fillna(display["status"])
-    display["completion_pct"]      = display["completion_pct"].apply(lambda x: f"{x:.1f}%")
-    display["fail_rate_pct"]       = display["fail_rate_pct"].apply(lambda x: f"{x:.1f}%")
+    display["status"] = display["status"].map(status_icons).fillna(display["status"])
+    display["completion_pct"] = display["completion_pct"].apply(lambda x: f"{x:.1f}%")
+    display["fail_rate_pct"] = display["fail_rate_pct"].apply(lambda x: f"{x:.1f}%")
     display["expected_completion"] = display["expected_completion"].apply(format_date)
 
     display.columns = [
-        "Name", "Level", "Supervisor", "Division",
-        "Completion %", "Fail Rate %", "Status",
-        "Delayed Courses", "Expected Completion",
+        "Name",
+        "Level",
+        "Supervisor",
+        "Division",
+        "Completion %",
+        "Fail Rate %",
+        "Status",
+        "Delayed Courses",
+        "Expected Completion",
     ]
     st.dataframe(display, use_container_width=True, hide_index=True)
 
 
 # ── Page entry point ──────────────────────────────────────────────────────────
 
+
 def main() -> None:
     auth = require_auth()
     user_info = render_sidebar(auth)
 
     if not any(has_role(auth, r) for r in [ROLE_SUPERVISOR, ROLE_ADMIN, ROLE_AUDITOR]):
-        st.error("🚫 Access Denied — This page is restricted to supervisors, admins, and auditors.")
+        st.error(
+            "🚫 Access Denied — This page is restricted to supervisors, admins, and auditors."
+        )
         st.stop()
 
     _inject_styles()
@@ -652,15 +810,16 @@ def main() -> None:
     if is_supervisor_only:
         supervisor_name_filter = (user_info.get("displayName") or "").strip() or None
         if not supervisor_name_filter:
-            st.error("🚫 Cannot resolve your supervisor identity from Azure AD. Contact admin.")
+            st.error(
+                "🚫 Cannot resolve your supervisor identity from Azure AD. Contact admin."
+            )
             st.stop()
 
     # ── Sidebar Filters ───────────────────────────────────────────────────────
     st.sidebar.markdown("### Filters")
 
     with st.spinner("Loading analytics…"):
-        all_data   = load_program_analytics(supervisor_name_filter)
-        trend_data = load_analytics_trend(supervisor_name_filter)
+        all_data = load_program_analytics(supervisor_name_filter)
 
     df = pd.DataFrame(all_data)
 
@@ -668,47 +827,58 @@ def main() -> None:
         st.warning("No analytics data available.")
         return
 
-    # 3.1 — derive the Transmission/Distribution/Substation group from the
-    # cost-center (org_group). Edit rules in app/utils/org_groups.py.
     df["business_group"] = df["org_group"].map(classify_business_group)
 
     years = ["All"] + sorted(
-        df["expected_completion"].dropna()
+        df["expected_completion"]
+        .dropna()
         .apply(lambda d: str(d.year) if hasattr(d, "year") else None)
-        .dropna().unique().tolist(), reverse=True,
+        .dropna()
+        .unique()
+        .tolist(),
+        reverse=True,
     )
-    selected_year    = st.sidebar.selectbox("Year", years)
+    selected_year = st.sidebar.selectbox("Year", years)
     selected_quarter = st.sidebar.selectbox("Quarter", ["All", "Q1", "Q2", "Q3", "Q4"])
 
     st.sidebar.markdown("**Date Range (Expected Completion)**")
     min_date = df["expected_completion"].dropna().min()
     max_date = df["expected_completion"].dropna().max()
     if pd.notna(min_date) and pd.notna(max_date):
-        date_from = st.sidebar.date_input("From", value=min_date, min_value=min_date, max_value=max_date)
-        date_to   = st.sidebar.date_input("To",   value=max_date, min_value=min_date, max_value=max_date)
+        date_from = st.sidebar.date_input(
+            "From", value=min_date, min_value=min_date, max_value=max_date
+        )
+        date_to = st.sidebar.date_input(
+            "To", value=max_date, min_value=min_date, max_value=max_date
+        )
     else:
         date_from = date_to = None
 
-    # 3.1 — Org Group dropdown, default "All Electric".
     selected_org = st.sidebar.selectbox("Org Group", ["All Electric"] + BUSINESS_GROUPS)
 
     unmapped = (
         df.loc[df["business_group"] == UNMAPPED, "org_group"]
-        .replace("", pd.NA).dropna().value_counts()
+        .replace("", pd.NA)
+        .dropna()
+        .value_counts()
     )
     if not unmapped.empty:
-        with st.sidebar.expander(f"⚙ Org mapping — {len(unmapped)} unmapped", expanded=False):
+        with st.sidebar.expander(
+            f"⚙ Org mapping — {len(unmapped)} unmapped", expanded=False
+        ):
             st.caption("Add keywords for these in app/utils/org_groups.py:")
             for cost_center, n in unmapped.items():
                 st.caption(f"• {cost_center} ({n})")
 
     levels = ["All"] + sorted(df["level"].dropna().unique().tolist())
-    selected_level  = st.sidebar.selectbox("Level", levels)
+    selected_level = st.sidebar.selectbox("Level", levels)
 
     div_bu_series = _division_or_bu(df)
     divs = ["All"] + sorted(div_bu_series.dropna().unique().tolist())
-    selected_div    = st.sidebar.selectbox("Division / BU", divs)
-    selected_status = st.sidebar.selectbox("Status", ["All", "On Track", "Delayed", "At Risk", "Completed"])
+    selected_div = st.sidebar.selectbox("Division / BU", divs)
+    selected_status = st.sidebar.selectbox(
+        "Status", ["All", "On Track", "Delayed", "At Risk", "Completed"]
+    )
 
     if not is_supervisor_only:
         supervisors = ["All"] + sorted(df["supervisor_name"].dropna().unique().tolist())
@@ -751,7 +921,18 @@ def main() -> None:
     st.markdown("<br>", unsafe_allow_html=True)
 
     # 2. Trend + Pass/Fail — side by side ─────────────────────────────────────
-    st.markdown('<div class="section-header">📈 Completion Trend Over Time &nbsp;&nbsp;|&nbsp;&nbsp; ✅ Course Pass / Fail Rates</div>', unsafe_allow_html=True)
+    # Scope the trend to the same apprentices as the rest of the dashboard.
+    filtered_emp_ids = tuple(
+        sorted(filtered["id"].dropna().astype(str).unique().tolist())
+    )
+    trend_data = load_analytics_trend(
+        supervisor_name_filter, employee_ids=filtered_emp_ids
+    )
+
+    st.markdown(
+        '<div class="section-header">📈 Completion Trend Over Time &nbsp;&nbsp;|&nbsp;&nbsp; ✅ Course Pass / Fail Rates</div>',
+        unsafe_allow_html=True,
+    )
     st.markdown("---")
     col_trend, col_pf = st.columns([2, 1])
     with col_trend:
@@ -759,18 +940,27 @@ def main() -> None:
     with col_pf:
         _render_pass_fail(filtered)
 
-    # 3. Completion by Apprentice Year (3.4) ───────────────────────────────────
-    st.markdown('<div class="section-header">🎓 Completion Rate by Apprentice Year</div>', unsafe_allow_html=True)
+    # 3. Completion by Apprentice Year ───────────────────────────────────────────────────
+    st.markdown(
+        '<div class="section-header">🎓 Completion Rate by Apprentice Year</div>',
+        unsafe_allow_html=True,
+    )
     st.markdown("---")
     _render_completion_by_year(filtered)
 
     # 4. Completion by Division/BU ─────────────────────────────────────────────
-    st.markdown('<div class="section-header">🏢 Completion Rate by Division / BU</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="section-header">🏢 Completion Rate by Division / BU</div>',
+        unsafe_allow_html=True,
+    )
     st.markdown("---")
     _render_completion_by_division(filtered)
 
     # 5. Supervisor + At Risk — side by side paginated tables ─────────────────
-    st.markdown('<div class="section-header">👤 Completion by Supervisor &nbsp;&nbsp;|&nbsp;&nbsp; 🔴 At Risk Apprentices</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="section-header">👤 Completion by Supervisor &nbsp;&nbsp;|&nbsp;&nbsp; 🔴 At Risk Apprentices</div>',
+        unsafe_allow_html=True,
+    )
     st.markdown("---")
     col_sup, col_risk = st.columns(2)
     with col_sup:
@@ -779,7 +969,11 @@ def main() -> None:
         _render_at_risk_table(filtered)
 
     # 6. Documentation & Audit Analytics — Training Forms ─────────────────────
-    _render_training_forms(supervisor_name_filter)
+    # Scope viewer to the supervisor's apprentices only. Admins/auditors see all.
+    viewer_emp_ids: tuple[str, ...] | None = None
+    if supervisor_name_filter:
+        viewer_emp_ids = tuple(sorted(df["id"].dropna().astype(str).unique().tolist()))
+    _render_training_forms(viewer_emp_ids)
 
     # 7. Financial Analytics Placeholder ──────────────────────────────────────
     _render_financial_analytics()

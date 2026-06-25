@@ -1,10 +1,11 @@
 """Utility functions for formatting data for display."""
+
 from datetime import date, datetime
 from typing import Optional, Union
 
 
 def format_date(d: Optional[Union[date, datetime]], fmt: str = "%m/%d/%Y") -> str:
-    if not d:
+    if not hasattr(d, "strftime"):
         return "N/A"
     return d.strftime(fmt)
 

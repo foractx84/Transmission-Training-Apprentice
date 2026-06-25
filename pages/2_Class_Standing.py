@@ -1,4 +1,5 @@
 """Class Standing page — cohort-level progress overview."""
+
 import sys
 from pathlib import Path
 
@@ -6,6 +7,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import pandas as pd
 import streamlit as st
+from html import escape
 
 from app.components.navigation import require_auth, render_sidebar
 from app.services.analytics_service import load_class_standing
@@ -14,6 +16,7 @@ from app.core.rbac import has_role, ROLE_ADMIN, ROLE_SUPERVISOR, ROLE_AUDITOR
 
 
 # ── Styles ────────────────────────────────────────────────────────────────────
+
 
 def _inject_styles() -> None:
     st.markdown(
@@ -36,12 +39,13 @@ def _inject_styles() -> None:
 
 # ── Metric cards ──────────────────────────────────────────────────────────────
 
+
 def _metric_card(label: str, value: str) -> None:
     st.markdown(
         f"""
         <div class="metric-card">
-            <div class="metric-label">{label}</div>
-            <div class="metric-value">{value}</div>
+            <div class="metric-label">{escape(str(label))}</div>
+            <div class="metric-value">{escape(str(value))}</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -49,19 +53,25 @@ def _metric_card(label: str, value: str) -> None:
 
 
 def _render_metrics(df: pd.DataFrame) -> None:
-    total   = len(df)
+    total = len(df)
     delayed = int((df["status"] == "Delayed").sum())
-    alerts  = int(df["program_alerts"].sum())
-    nearest = df["expected_completion"].dropna().min() if not df.empty else None
+    alerts = int(df["program_alerts"].sum())
+    valid_dates = df["expected_completion"].dropna()
+    nearest = valid_dates.min() if not valid_dates.empty else None
 
     c1, c2, c3, c4 = st.columns(4)
-    with c1: _metric_card("Overall Standing",    str(total))
-    with c2: _metric_card("Expected Completion", format_date(nearest) if nearest else "N/A")
-    with c3: _metric_card("Delayed Tasks",       str(delayed))
-    with c4: _metric_card("Program Alerts",      str(alerts))
+    with c1:
+        _metric_card("Overall Standing", str(total))
+    with c2:
+        _metric_card("Expected Completion", format_date(nearest) if nearest else "N/A")
+    with c3:
+        _metric_card("Delayed Tasks", str(delayed))
+    with c4:
+        _metric_card("Program Alerts", str(alerts))
 
 
 # ── Left column ───────────────────────────────────────────────────────────────
+
 
 def _render_apprenticeship_level(df: pd.DataFrame) -> None:
     st.markdown("#### Apprenticeship Level")
@@ -74,7 +84,11 @@ def _render_apprenticeship_level(df: pd.DataFrame) -> None:
 
     level_summary = (
         df.groupby("level")
-        .agg(count=("id", "count"), avg_pct=("completion_pct", "mean"), delayed=("delayed_tasks", "sum"))
+        .agg(
+            count=("id", "count"),
+            avg_pct=("completion_pct", "mean"),
+            delayed=("delayed_tasks", "sum"),
+        )
         .reset_index()
         .sort_values("level")
     )
@@ -99,9 +113,11 @@ def _render_training_insights(df: pd.DataFrame) -> None:
         st.info("No training data available.")
         return
 
-    at_risk = df[df["status"].isin(["At Risk", "Delayed"])].sort_values(
-        "delayed_tasks", ascending=False
-    ).head(5)
+    at_risk = (
+        df[df["status"].isin(["At Risk", "Delayed"])]
+        .sort_values("delayed_tasks", ascending=False)
+        .head(5)
+    )
 
     if at_risk.empty:
         st.success("✅ No at-risk apprentices.")
@@ -117,6 +133,7 @@ def _render_training_insights(df: pd.DataFrame) -> None:
 
 # ── Middle column ─────────────────────────────────────────────────────────────
 
+
 def _render_training_summary(df: pd.DataFrame) -> None:
     st.markdown("#### Training Summary and Recommendations")
     st.caption("Detailed list of training and insights from training")
@@ -126,19 +143,29 @@ def _render_training_summary(df: pd.DataFrame) -> None:
         st.info("No training records available.")
         return
 
-    counts    = df["status"].value_counts()
-    on_track  = int(counts.get("On Track",  0))
-    delayed   = int(counts.get("Delayed",   0))
-    at_risk   = int(counts.get("At Risk",   0))
+    counts = df["status"].value_counts()
+    on_track = int(counts.get("On Track", 0))
+    delayed = int(counts.get("Delayed", 0))
+    at_risk = int(counts.get("At Risk", 0))
     completed = int(counts.get("Completed", 0))
 
     c1, c2 = st.columns(2)
     with c1:
-        st.metric("On Track",  on_track)
+        st.metric("On Track", on_track)
         st.metric("Completed", completed)
     with c2:
-        st.metric("Delayed", delayed, delta=f"-{delayed}" if delayed else None, delta_color="inverse")
-        st.metric("At Risk",  at_risk,  delta=f"-{at_risk}"  if at_risk  else None, delta_color="inverse")
+        st.metric(
+            "Delayed",
+            delayed,
+            delta=f"-{delayed}" if delayed else None,
+            delta_color="inverse",
+        )
+        st.metric(
+            "At Risk",
+            at_risk,
+            delta=f"-{at_risk}" if at_risk else None,
+            delta_color="inverse",
+        )
 
     st.markdown("<br>", unsafe_allow_html=True)
     st.markdown("**Recommendations**")
@@ -155,11 +182,14 @@ def _render_training_summary(df: pd.DataFrame) -> None:
 
 # ── Right column ──────────────────────────────────────────────────────────────
 
+
 def _render_docs_alerts(df: pd.DataFrame) -> None:
     st.markdown("#### Documentation & Alerts")
     st.caption("Training documentation roadmap and alerts")
     st.markdown("---")
-    st.caption("*Forming program guardrails and following process through an auditable process*")
+    st.caption(
+        "*Forming program guardrails and following process through an auditable process*"
+    )
 
     if df.empty:
         st.info("No alerts.")
@@ -176,11 +206,14 @@ def _render_docs_alerts(df: pd.DataFrame) -> None:
             st.write(f"**Level:** {row['level']}")
             st.write(f"**Supervisor:** {row['supervisor_name']}")
             st.write(f"**Delayed Tasks:** {int(row['delayed_tasks'])}")
-            st.write(f"**Expected Completion:** {format_date(row['expected_completion'])}")
+            st.write(
+                f"**Expected Completion:** {format_date(row['expected_completion'])}"
+            )
             st.write(f"**Status:** {row['status']}")
 
 
 # ── Roster table ──────────────────────────────────────────────────────────────
+
 
 def _render_roster(df: pd.DataFrame) -> None:
     st.markdown("#### Apprentice Roster")
@@ -191,27 +224,37 @@ def _render_roster(df: pd.DataFrame) -> None:
         return
 
     status_icons = {
-        "On Track":  "🟢 On Track",
-        "Delayed":   "🟡 Delayed",
-        "At Risk":   "🔴 At Risk",
+        "On Track": "🟢 On Track",
+        "Delayed": "🟡 Delayed",
+        "At Risk": "🔴 At Risk",
         "Completed": "🔵 Completed",
     }
 
-    display = df[[
-        "name", "level", "supervisor_name",
-        "completion_pct", "status",
-        "open_tasks", "delayed_tasks",
-        "expected_completion",
-    ]].copy()
+    display = df[
+        [
+            "name",
+            "level",
+            "supervisor_name",
+            "completion_pct",
+            "status",
+            "open_tasks",
+            "delayed_tasks",
+            "expected_completion",
+        ]
+    ].copy()
 
-    display["status"]              = display["status"].map(status_icons).fillna(display["status"])
-    display["completion_pct"]      = display["completion_pct"].apply(lambda x: f"{x:.1f}%")
+    display["status"] = display["status"].map(status_icons).fillna(display["status"])
+    display["completion_pct"] = display["completion_pct"].apply(lambda x: f"{x:.1f}%")
     display["expected_completion"] = display["expected_completion"].apply(format_date)
 
     display.columns = [
-        "Name", "Level", "Supervisor",
-        "Completion", "Status",
-        "Open Tasks", "Delayed Tasks",
+        "Name",
+        "Level",
+        "Supervisor",
+        "Completion",
+        "Status",
+        "Open Tasks",
+        "Delayed Tasks",
         "Expected Completion",
     ]
 
@@ -220,12 +263,15 @@ def _render_roster(df: pd.DataFrame) -> None:
 
 # ── Page entry point ──────────────────────────────────────────────────────────
 
+
 def main() -> None:
     auth = require_auth()
     render_sidebar(auth)
 
     if not any(has_role(auth, r) for r in [ROLE_SUPERVISOR, ROLE_ADMIN, ROLE_AUDITOR]):
-        st.error("🚫 Access Denied — This page is restricted to supervisors, admins, and auditors.")
+        st.error(
+            "🚫 Access Denied — This page is restricted to supervisors, admins, and auditors."
+        )
         st.stop()
 
     _inject_styles()
