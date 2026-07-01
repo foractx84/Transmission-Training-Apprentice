@@ -1,9 +1,9 @@
 """Map cost-center descriptions (org_group) → business groups.
 
-The view exposes `org_group` = COSTCENTER_DESCRIPTION, which is NOT literally
-"Transmission" / "Distribution" / "Substation". The dropdown on Program
-Analytics / Class Standing needs those three clean groups, so we classify each
-cost center here.
+The view exposes `org_group` = COSTCENTER_DESCRIPTION, which is not literally
+one of the business groups shown in the dropdown (Transmission / Distribution /
+Substation / Metering / Generation). The dropdown on Program Analytics /
+Class Standing needs those clean groups, so we classify each cost center here.
 
 HOW TO FINISH THE MAPPING:
   1. Open Program Analytics — the sidebar shows an "Org mapping" panel listing
@@ -40,8 +40,9 @@ _RULES: list[tuple[str, str]] = [
 
 
 def classify_business_group(cost_center: str | None) -> str:
-    """Return 'Transmission' / 'Distribution' / 'Substation', or UNMAPPED."""
-    if not cost_center:
+    """Return one of BUSINESS_GROUPS (Transmission / Distribution / Substation /
+    Metering / Generation), or UNMAPPED."""
+    if not isinstance(cost_center, str) or not cost_center:
         return UNMAPPED
     text = cost_center.upper()
     for keyword, group in _RULES:

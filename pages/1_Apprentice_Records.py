@@ -13,6 +13,7 @@ from app.components.navigation import require_auth, render_sidebar
 from app.utils.formatters import format_date, format_hours
 from app.utils.constants import COLOR_PRIMARY, COLOR_ACCENT
 from app.services.analytics_service import (
+    load_apprentices,
     load_apprentice_by_email,
     load_apprentice_records_for,
     derive_milestones,
@@ -20,6 +21,7 @@ from app.services.analytics_service import (
     derive_docs_alerts,
 )
 from app.core.rbac import has_role, ROLE_APPRENTICE
+from app.core.demo import demo_enabled
 
 # ── Styles ────────────────────────────────────────────────────────────────────
 
@@ -178,9 +180,140 @@ def _render_docs_alerts(docs_alerts: list[dict]) -> None:
             st.divider()
 
 
+# ── Shared dashboard layout ───────────────────────────────────────────────────
+
+def _render_dashboard(
+    apprentice: dict,
+    milestones: list[dict],
+    training_summary: list[dict],
+    docs_alerts: list[dict],
+) -> None:
+    """Render the metric pills + three-column dashboard. Shared by the live
+    and demo code paths so both stay visually identical."""
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    _render_metrics(apprentice)
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    left_col, mid_col, right_col = st.columns([1.2, 1.5, 1.5])
+
+    with left_col:
+        _render_apprenticeship_level(milestones)
+        st.markdown("<br>", unsafe_allow_html=True)
+        _render_training_insights(training_summary)
+
+    with mid_col:
+        _render_training_summary(training_summary)
+
+    with right_col:
+        _render_docs_alerts(docs_alerts)
+
+
+# ── Demo (login-free) entry point ─────────────────────────────────────────────
+
+def _render_demo_sidebar_picker() -> str | None:
+    """Render the demo badge + apprentice picker in the sidebar.
+
+    Returns the selected/entered apprentice email (lower-cased) or None.
+    The picker is a test-harness control shown ONLY in demo mode — it is not
+    part of any apprentice's own view.
+    """
+    st.markdown(
+        """
+        <style>
+        .block-container { padding-top: 1rem !important; }
+        h1 { margin-bottom: 0 !important; }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    with st.sidebar:
+        st.title("⚡ Transmission Training")
+        st.divider()
+        st.info(
+            "🧪 **Demo Mode**\n\n"
+            "Login-free preview of a **real** apprentice record. "
+            "Pick an apprentice below to see exactly what they would see."
+        )
+        st.divider()
+
+        apprentices = load_apprentices()
+        # label → email, skipping records with no email to match on
+        options = {
+            f"{a['name']} — {a['email']}": a["email"]
+            for a in apprentices
+            if a.get("email")
+        }
+
+        selected_label = st.selectbox(
+            "Preview as apprentice",
+            sorted(options.keys()),
+            index=None,
+            placeholder="Select an apprentice…",
+        )
+        manual = st.text_input(
+            "…or enter an apprentice email",
+            placeholder="name@example.com",
+        )
+
+    if manual.strip():
+        return manual.strip().lower()
+    if selected_label:
+        return options.get(selected_label)
+    return None
+
+
+def _render_demo() -> None:
+    """Login-free preview of a real apprentice's record — no Azure AD.
+
+    Loads live data from BigQuery (host GCP credentials) via the same loaders
+    and derivers as the live page, so the rendered view is identical to what
+    the selected apprentice would see: own record only, no class-wide or
+    supervisor data.
+    """
+    _inject_styles()
+
+    email = _render_demo_sidebar_picker()
+
+    st.title("Apprentice Records")
+    st.caption("🧪 Demo Mode — real data, no login required")
+    st.markdown("---")
+
+    if not email:
+        st.info(
+            "👈 Select an apprentice (or enter an email) in the sidebar "
+            "to load their record."
+        )
+        return
+
+    with st.spinner("Loading record…"):
+        apprentice = load_apprentice_by_email(email)  # ← server-side email filter
+
+    if apprentice is None:
+        st.warning(
+            f"No training record found for **{escape(email)}**. "
+            "Check the email, or confirm the apprentice is active in the program."
+        )
+        return
+
+    records = load_apprentice_records_for(apprentice["id"])
+    _render_dashboard(
+        apprentice,
+        derive_milestones(records),
+        derive_training_summary(records),
+        derive_docs_alerts(records),
+    )
+
+
 # ── Page entry point ──────────────────────────────────────────────────────────
 
 def main() -> None:
+    if demo_enabled():
+        _render_demo()
+        return
+
     auth = require_auth()
     user_info = render_sidebar(auth)
 
@@ -237,24 +370,7 @@ def main() -> None:
         docs_alerts      = derive_docs_alerts(records)
 
     # ── Render ────────────────────────────────────────────────────────────────
-    st.markdown("<br>", unsafe_allow_html=True)
-
-    _render_metrics(apprentice)
-
-    st.markdown("<br>", unsafe_allow_html=True)
-
-    left_col, mid_col, right_col = st.columns([1.2, 1.5, 1.5])
-
-    with left_col:
-        _render_apprenticeship_level(milestones)
-        st.markdown("<br>", unsafe_allow_html=True)
-        _render_training_insights(training_summary)
-
-    with mid_col:
-        _render_training_summary(training_summary)
-
-    with right_col:
-        _render_docs_alerts(docs_alerts)
+    _render_dashboard(apprentice, milestones, training_summary, docs_alerts)
 
 
 main()

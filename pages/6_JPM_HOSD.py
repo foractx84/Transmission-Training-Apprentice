@@ -393,6 +393,7 @@ def _render_sync_section(config: dict) -> None:
                 st.session_state.sync_timestamp = datetime.now()
                 st.session_state.sync_result = (ok, msg)
                 _list_pdfs.clear()
+                _download_pdf.clear()
                 st.rerun()
         with c2:
             ts = st.session_state.get("sync_timestamp")
@@ -476,6 +477,14 @@ def _render_task_selector(gcs_bucket: str) -> str | None:
 def _render_pdf_panel(gcs_bucket: str, selected_task: str | None) -> None:
     if not selected_task:
         st.info("Select a form to preview it here.")
+        return
+
+    show_preview = st.toggle(
+        "👁 Show Form Preview",
+        key=f"show_pdf_preview_{selected_task}",
+        help="Load and display the selected JPM/HOSD form.",
+    )
+    if not show_preview:
         return
 
     try:
@@ -594,8 +603,7 @@ def _render_evaluator_section(user_info: dict) -> tuple[str, str]:
             unsafe_allow_html=True,
         )
 
-    # Fall back to email for audit trail if SAP lookup didn't resolve an ID.
-    return (evaluator_emp_id or email), evaluator_name
+    return evaluator_emp_id, evaluator_name
 
 
 def _render_evaluation_details() -> tuple[date, str, str, datetime]:
@@ -839,11 +847,7 @@ def _send_and_log_confirmations(ctx: dict) -> list[str]:
         ("apprentice", ctx.get("apprentice_email")),
         ("supervisor", ctx.get("supervisor_email")),
     ):
-        if email:
-            ok, err = send_confirmation_email(email, subject, body)
-            status = "SENT" if ok else "FAILED"
-        else:
-            err, status = "No email on file", "SKIPPED"
+        status, err = send_confirmation_email(email, subject, body)
 
         try:
             insert_communication_log(
@@ -856,15 +860,17 @@ def _send_and_log_confirmations(ctx: dict) -> list[str]:
                 email_type="JPM_HOSD_CONFIRMATION",
                 subject=subject,
                 status=status,
-                error_message=None if status == "SENT" else err,
+                error_message=None if status in ("SENT", "DRY_RUN") else err,
             )
         except Exception as e:  # logging must not break submission
             logger.error("Communication log insert failed (%s): %s", recipient_type, e)
 
         if status == "SENT":
             messages.append(f"📧 Confirmation sent to {recipient_type} ({email}).")
+        elif status == "DRY_RUN":
+            messages.append(f"🧪 Dry run — {recipient_type} confirmation logged, not sent.")
         elif status == "SKIPPED":
-            messages.append(f"⚠️ No {recipient_type} email on file — skipped.")
+            messages.append(f"⚠️ {recipient_type.capitalize()} skipped: {err}.")
         else:
             messages.append(f"❌ Email to {recipient_type} failed: {err}")
     return messages
@@ -901,6 +907,9 @@ def main() -> None:
     current_user_email = (
         user_info.get("mail") or user_info.get("userPrincipalName") or ""
     )
+    if not is_admin and not current_user_email.strip():
+        st.error("Cannot resolve your email from Azure AD. Please contact your administrator.")
+        st.stop()
 
     _inject_styles()
 
@@ -1027,7 +1036,7 @@ def main() -> None:
             "form_version": form_version,
             "result": result,
             "comments": merged_comments,
-            "submitted_by": evaluator_emp_id,
+            "submitted_by": evaluator_emp_id or current_user_email,
             "submitted_at": datetime.now(timezone.utc).isoformat(),
             "ident": None,
             "performance_objective": None,

@@ -7,7 +7,10 @@ from typing import Optional, Union
 def format_date(d: Optional[Union[date, datetime]], fmt: str = "%m/%d/%Y") -> str:
     if not hasattr(d, "strftime"):
         return "N/A"
-    return d.strftime(fmt)
+    try:
+        return d.strftime(fmt)
+    except (ValueError, AttributeError):
+        return "N/A"
 
 
 def format_percent(value: float, decimals: int = 1) -> str:

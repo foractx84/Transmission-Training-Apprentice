@@ -1,11 +1,82 @@
 """BigQuery service — data access layer for production data."""
 
+import logging
+from functools import wraps
 from typing import Dict, List, Optional, Tuple
 from google.cloud import bigquery
+from google.api_core.exceptions import Forbidden, NotFound, BadRequest, GoogleAPIError
+from google.auth.exceptions import GoogleAuthError
 from datetime import datetime, timezone
 from uuid import uuid4
 
 from app.core.config import get_bigquery_config
+
+logger = logging.getLogger(__name__)
+
+
+class BigQueryError(Exception):
+    """A BigQuery operation failed. The message is safe to show to users.
+
+    Mirrors ``GCSError`` in the storage service so pages can surface a clean,
+    user-friendly message instead of a raw Google API traceback.
+    """
+
+
+def _bq_guard(action: str):
+    """Translate raw BigQuery/credential errors into a user-friendly BigQueryError.
+
+    ``action`` is a short phrase used in the message, e.g. "load evaluations".
+    The real exception is always logged; the raised message never leaks internal
+    details (dataset names, stack traces, Graph/Google payloads) to the user.
+    """
+
+    def decorator(fn):
+        @wraps(fn)
+        def wrapper(*args, **kwargs):
+            try:
+                return fn(*args, **kwargs)
+            except BigQueryError:
+                raise  # already user-friendly — don't re-wrap
+            except Forbidden as e:
+                logger.error("BigQuery permission denied while trying to %s: %s", action, e)
+                raise BigQueryError(
+                    f"You don't have permission to {action}. "
+                    "Please contact your administrator."
+                ) from e
+            except NotFound as e:
+                logger.error("BigQuery resource not found while trying to %s: %s", action, e)
+                raise BigQueryError(
+                    f"Couldn't {action} — the data source was not found. "
+                    "Please contact your administrator."
+                ) from e
+            except BadRequest as e:
+                logger.error("BigQuery bad request while trying to %s: %s", action, e)
+                raise BigQueryError(
+                    f"Couldn't {action} due to a query error. "
+                    "Please contact your administrator."
+                ) from e
+            except GoogleAuthError as e:
+                logger.error("BigQuery auth error while trying to %s: %s", action, e)
+                raise BigQueryError(
+                    f"Couldn't {action} — database authentication failed. "
+                    "Please contact your administrator."
+                ) from e
+            except GoogleAPIError as e:
+                logger.error("BigQuery API error while trying to %s: %s", action, e)
+                raise BigQueryError(
+                    f"Couldn't {action} right now. Please try again in a moment."
+                ) from e
+            except RuntimeError as e:
+                # _get_client() raises this when configuration is missing.
+                logger.error("BigQuery configuration error while trying to %s: %s", action, e)
+                raise BigQueryError(
+                    f"Couldn't {action} — the database is not configured correctly. "
+                    "Please contact your administrator."
+                ) from e
+
+        return wrapper
+
+    return decorator
 
 
 def _get_client() -> bigquery.Client:
@@ -36,23 +107,42 @@ def insert_jpm_evaluation(
         tasks: List of row dicts matching the `evaluation_tasks` schema.
 
     Returns:
-        (success, error_message) — error_message is None on success.
+        (success, error_message) — error_message is None on success, and a
+        user-friendly string on failure. Never raises: a database/network/auth
+        failure is turned into a clean message so the submit page can show it
+        instead of crashing with a raw traceback.
     """
-    client = _get_client()
+    try:
+        client = _get_client()
 
-    # Insert parent row
-    errors = client.insert_rows_json(_table_ref("evaluations"), [evaluation])
-    if errors:
-        return False, f"Error inserting evaluation: {errors}"
-
-    # Insert child rows
-    if tasks:
-        errors = client.insert_rows_json(_table_ref("evaluation_tasks"), tasks)
+        # Insert parent row
+        errors = client.insert_rows_json(_table_ref("evaluations"), [evaluation])
         if errors:
-            return False, f"Error inserting tasks: {errors}"
+            logger.error("BigQuery row errors inserting evaluation: %s", errors)
+            return False, (
+                "The evaluation couldn't be saved because some fields were "
+                "rejected by the database. Please review your entries and try again."
+            )
 
-    return True, None
+        # Insert child rows
+        if tasks:
+            errors = client.insert_rows_json(_table_ref("evaluation_tasks"), tasks)
+            if errors:
+                logger.error("BigQuery row errors inserting evaluation tasks: %s", errors)
+                return False, (
+                    "The task scores couldn't be saved because some fields were "
+                    "rejected by the database. Please review your entries and try again."
+                )
 
+        return True, None
+    except (GoogleAPIError, GoogleAuthError, RuntimeError) as e:
+        logger.error("Failed to save JPM evaluation: %s", e)
+        return False, (
+            "Couldn't save the evaluation to the database right now. "
+            "Please try again in a moment, or contact your administrator if it persists."
+        )
+
+@_bq_guard("record the email in the communication log")
 def insert_communication_log(
     evaluation_id: str,
     apprentice_id: str,
@@ -89,9 +179,14 @@ def insert_communication_log(
     errors = client.insert_rows_json(_table_ref("communication_log"), [row])
 
     if errors:
-        raise RuntimeError(f"Failed to insert communication log: {errors}")
+        logger.error("BigQuery row errors inserting communication log: %s", errors)
+        raise BigQueryError(
+            "Couldn't record the email in the communication log. "
+            "Please try again in a moment."
+        )
 
 
+@_bq_guard("load the communication history")
 def fetch_communication_log(
     email_type: str | None = None,
     limit: int = 200,
@@ -148,6 +243,7 @@ def fetch_communication_log(
     ]
 
 
+@_bq_guard("load the list of courses")
 def fetch_distinct_course_names(
     employee_ids: tuple[str, ...] | None = None,
 ) -> List[Dict]:
@@ -192,6 +288,7 @@ def fetch_distinct_course_names(
     return [{"course_id": r["course_id"], "course_name": r["task_name"]} for r in rows]
 
 
+@_bq_guard("load evaluations for this course")
 def fetch_evaluation_ids_for_course(
     course_name: str,
     employee_ids: tuple[str, ...] | None = None,
@@ -241,6 +338,7 @@ def fetch_evaluation_ids_for_course(
     ]
 
 
+@_bq_guard("load this evaluation")
 def fetch_evaluation_by_id(evaluation_id: str) -> Optional[Dict]:
     """Return full evaluation row + tasks for a given evaluation_id."""
     client = _get_client()
@@ -282,6 +380,7 @@ def fetch_evaluation_by_id(evaluation_id: str) -> Optional[Dict]:
 
     return ev
 
+@_bq_guard("load the list of evaluation forms")
 def fetch_evaluation_codes() -> List[Dict]:
     """Distinct JPM/HOSD evaluations that have predefined questions.
     """
@@ -297,6 +396,7 @@ def fetch_evaluation_codes() -> List[Dict]:
     """
     return [dict(row) for row in client.query(sql).result()]
 
+@_bq_guard("load the program structure")
 def fetch_program_structure() -> List[Dict]:
     """Flat rows describing the program structure, from Evaluation_Questions.
 
@@ -320,6 +420,7 @@ def fetch_program_structure() -> List[Dict]:
     return [dict(row) for row in client.query(sql).result()]
 
 
+@_bq_guard("load the questions for this evaluation")
 def fetch_evaluation_questions(evaluation_code: str) -> List[Dict]:
     """Return the ordered question/task definitions for one Evaluation_Code.
 
@@ -362,6 +463,7 @@ def fetch_evaluation_questions(evaluation_code: str) -> List[Dict]:
 SAP_EMPLOYEE_VIEW = "cnp-datafoundation-prod.SAP_REPORTING_VIEWS.SV_EMPLOYEE_ATTRIBUTES"
 
 
+@_bq_guard("look up your employee record")
 def fetch_employee_by_email(email: str) -> Optional[dict]:
     """
     Fetch employee record by email from SAP HR view.
@@ -396,6 +498,7 @@ def fetch_employee_by_email(email: str) -> Optional[dict]:
     }
 
 
+@_bq_guard("load the apprentice record")
 def fetch_apprentice_by_id(employee_id: str) -> Optional[dict]:
     """
     Fetch apprentice information by employee ID.
@@ -440,6 +543,7 @@ def fetch_apprentice_by_id(employee_id: str) -> Optional[dict]:
         "bu": row["bu"],
     }
 
+@_bq_guard("load the completed evaluations")
 def fetch_completed_evaluations(supervisor_name: str | None = None) -> List[Dict]:
     """Completed evaluation records for the Completed Documentation view.
 

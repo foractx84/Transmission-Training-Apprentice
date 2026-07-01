@@ -1,6 +1,7 @@
 """Class Standing page — cohort-level progress overview."""
 
 import sys
+from datetime import date
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -10,7 +11,11 @@ import streamlit as st
 from html import escape
 
 from app.components.navigation import require_auth, render_sidebar
-from app.services.analytics_service import load_class_standing
+from app.services.analytics_service import (
+    load_class_standing,
+    load_delayed_tasks,
+    load_alert_items,
+)
 from app.utils.formatters import format_date
 from app.core.rbac import has_role, ROLE_ADMIN, ROLE_SUPERVISOR, ROLE_AUDITOR
 
@@ -24,13 +29,53 @@ def _inject_styles() -> None:
         <style>
         .metric-card {
             background: #1e2130;
+            border: 1px solid #2d3748;
             border-radius: 12px;
-            padding: 1.2rem 1.5rem;
+            padding: 1.25rem 1rem;
             text-align: center;
             margin-bottom: 0.5rem;
+            min-height: 148px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
         }
-        .metric-label { font-size: 0.85rem; color: #a0aec0; margin-bottom: 0.3rem; }
-        .metric-value { font-size: 2rem;   font-weight: 700; color: #ffffff; }
+        .metric-label {
+            font-size: 0.78rem;
+            color: #a0aec0;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+            line-height: 1.25;
+            min-height: 2.4em;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .metric-value {
+            font-size: 1.9rem;
+            font-weight: 700;
+            color: #ffffff;
+            line-height: 1.15;
+            white-space: nowrap;
+            margin-top: 0.35rem;
+        }
+        .metric-sub {
+            font-size: 0.82rem;
+            color: #63b3ed;
+            margin-top: 0.45rem;
+        }
+        .st-key-delayed_drill_btn {
+            margin-top: -9.75rem;
+            position: relative;
+            z-index: 5;
+        }
+        .st-key-delayed_drill_btn button {
+            height: 9.25rem;
+            opacity: 0;
+            cursor: pointer;
+        }
+        .metric-card.clickable { cursor: pointer; transition: border 0.15s ease; }
+        .metric-card.clickable:hover { border-color: #63b3ed; }
         </style>
         """,
         unsafe_allow_html=True,
@@ -40,35 +85,115 @@ def _inject_styles() -> None:
 # ── Metric cards ──────────────────────────────────────────────────────────────
 
 
-def _metric_card(label: str, value: str) -> None:
+def _metric_card(
+    label: str, value: str, sub: str | None = None, clickable: bool = False
+) -> None:
+    sub_html = (
+        f'<div class="metric-sub">{escape(str(sub))}</div>' if sub else ""
+    )
+    card_class = "metric-card clickable" if clickable else "metric-card"
     st.markdown(
         f"""
-        <div class="metric-card">
+        <div class="{card_class}">
             <div class="metric-label">{escape(str(label))}</div>
             <div class="metric-value">{escape(str(value))}</div>
+            {sub_html}
         </div>
         """,
         unsafe_allow_html=True,
     )
 
+def _next_journeyman_completion(df: pd.DataFrame) -> tuple[date | None, int]:
+    """Find the next month a group of apprentices is expected to complete.
+
+    Each apprentice's `expected_completion` is their final-course date (a
+    per-apprentice MAX from the query). We bucket those by month, pick the
+    earliest upcoming month (falling back to the earliest overall if every
+    date is in the past), and count how many apprentices land in it.
+    """
+    valid = pd.to_datetime(df["expected_completion"], errors="coerce").dropna()
+    if valid.empty:
+        return None, 0
+
+    months = valid.dt.to_period("M")
+    this_month = pd.Timestamp(date.today()).to_period("M")
+    upcoming = months[months >= this_month]
+    target = upcoming.min() if not upcoming.empty else months.min()
+
+    count = int((months == target).sum())
+    return target.to_timestamp().date(), count
 
 def _render_metrics(df: pd.DataFrame) -> None:
     total = len(df)
-    delayed = int((df["status"] == "Delayed").sum())
-    alerts = int(df["program_alerts"].sum())
-    valid_dates = df["expected_completion"].dropna()
-    nearest = valid_dates.min() if not valid_dates.empty else None
+    delayed = int((df["delayed_tasks"] > 0).sum())
+    # Program Alerts = distinct apprentices who need attention: at least one
+    # late (is_delayed) OR failed (is_failed) task. Excludes approaching/upcoming
+    # (is_coming_due), which the old program_alerts sum included.
+    alerts = int(((df["delayed_tasks"] > 0) | (df["failed_tasks"] > 0)).sum())
+    next_month, completing = _next_journeyman_completion(df)
 
     c1, c2, c3, c4 = st.columns(4)
     with c1:
         _metric_card("Overall Standing", str(total))
     with c2:
-        _metric_card("Expected Completion", format_date(nearest) if nearest else "N/A")
+        if next_month:
+            _metric_card(
+                "Next Journeyman Completion",
+                format_date(next_month, "%b %Y"),
+                sub=f"{completing} apprentice{'s' if completing != 1 else ''}",
+            )
+        else:
+            _metric_card("Next Journeyman Completion", "N/A")
     with c3:
-        _metric_card("Delayed Tasks", str(delayed))
+        _metric_card("Delayed Apprentices", str(delayed), clickable=True)
+        if st.button(
+            "Open delayed tasks",
+            key="delayed_drill_btn",
+            use_container_width=True,
+        ):
+            st.session_state.delayed_drill = not st.session_state.get(
+                "delayed_drill", False
+            )
     with c4:
         _metric_card("Program Alerts", str(alerts))
 
+    _render_delayed_drilldown(df)
+
+def _render_delayed_drilldown(df: pd.DataFrame) -> None:
+    """Show who is delayed and exactly what they are delayed on.
+    """
+    if not st.session_state.get("delayed_drill"):
+        return
+
+    st.markdown("---")
+    st.markdown("#### 🟡 Delayed Tasks — who & what")
+    st.caption("Apprentices with one or more delayed tasks, and the tasks they're delayed on.")
+
+    detail = load_delayed_tasks()
+    if not detail.empty:
+        detail = detail[detail["apprentice_id"].isin(set(df["id"]))]
+
+    if detail.empty:
+        st.success("✅ No delayed tasks for the current filters.")
+        return
+
+    table = detail[
+        ["name", "level", "supervisor_name", "task", "status", "expected_completion_date"]
+    ].copy()
+    table["expected_completion_date"] = table["expected_completion_date"].apply(format_date)
+    table.columns = [
+        "Apprentice",
+        "Level",
+        "Supervisor",
+        "Delayed Task",
+        "Status",
+        "Expected Completion",
+    ]
+
+    st.dataframe(table, use_container_width=True, hide_index=True)
+    st.caption(
+        f"{detail['apprentice_id'].nunique()} apprentice(s), {len(detail)} delayed task(s)."
+    )
 
 # ── Left column ───────────────────────────────────────────────────────────────
 
@@ -195,21 +320,56 @@ def _render_docs_alerts(df: pd.DataFrame) -> None:
         st.info("No alerts.")
         return
 
-    alerts = df[df["program_alerts"] > 0].sort_values("program_alerts", ascending=False)
+    items = load_alert_items()
+    if not items.empty:
+        items = items[items["apprentice_id"].isin(set(df["id"]))]
 
-    if alerts.empty:
+    if items.empty:
         st.success("✅ No program alerts.")
         return
 
-    for _, row in alerts.iterrows():
-        with st.expander(f"⚠️ {row['name']} — {int(row['program_alerts'])} alert(s)"):
-            st.write(f"**Level:** {row['level']}")
-            st.write(f"**Supervisor:** {row['supervisor_name']}")
-            st.write(f"**Delayed Tasks:** {int(row['delayed_tasks'])}")
-            st.write(
-                f"**Expected Completion:** {format_date(row['expected_completion'])}"
+    # Due date per item: recerts (Coming Due) use requal_date; others use the
+    # expected completion date.
+    due = items["expected_completion_date"]
+    if "requal_date" in items.columns:
+        due = items["requal_date"].where(
+            items["category"].eq("Coming Due") & items["requal_date"].notna(),
+            items["expected_completion_date"],
+        )
+    items = items.assign(due_date=due)
+
+    cat_icon = {"Failed": "🔴", "Late": "⏳", "Coming Due": "🟡"}
+    cat_word = {"Failed": "failed", "Late": "late", "Coming Due": "coming due"}
+    cat_order = ["Failed", "Late", "Coming Due"]
+
+    # Most items first so the worst cases surface at the top.
+    totals = items.groupby("apprentice_id").size().sort_values(ascending=False)
+
+    for aid in totals.index:
+        person = items[items["apprentice_id"] == aid]
+        name = person["name"].iloc[0]
+        total = len(person)
+        counts = person["category"].value_counts()
+
+        with st.expander(f"⚠️ {name} — {total} total item(s)"):
+            breakdown = "  ·  ".join(
+                f"{cat_icon[c]} {int(counts[c])} {cat_word[c]}"
+                for c in cat_order
+                if c in counts
             )
-            st.write(f"**Status:** {row['status']}")
+            st.markdown(breakdown)
+            st.caption(
+                f"Level: {person['level'].iloc[0]}  ·  "
+                f"Supervisor: {person['supervisor_name'].iloc[0]}"
+            )
+
+            table = person[["task", "category", "status", "due_date"]].copy()
+            table["due_date"] = table["due_date"].apply(format_date)
+            table["category"] = table["category"].map(
+                lambda c: f"{cat_icon.get(c, '')} {c}"
+            )
+            table.columns = ["Course / Task", "Issue", "Status", "Due / Expected"]
+            st.dataframe(table, use_container_width=True, hide_index=True)
 
 
 # ── Roster table ──────────────────────────────────────────────────────────────

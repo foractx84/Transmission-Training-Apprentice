@@ -490,22 +490,34 @@ def _field(label: str, value) -> None:
     )
 
 
+def _apprentice_display(ev: dict) -> str:
+    """Render the apprentice as 'Name (EmployeeID)', degrading gracefully."""
+    name = ev.get("employee_name") or ev.get("apprentice_name")
+    emp_id = ev.get("apprentice_id")
+    if name and emp_id:
+        return f"{name} ({emp_id})"
+    return name or (str(emp_id) if emp_id else "—")
+
+
 def _render_completed_record(ev: dict) -> None:
-    c1, c2, c3 = st.columns(3)
+    _field("Evaluation Title", _clean_title(ev.get("task_name")))
+
+    c1, c2 = st.columns(2)
     with c1:
-        _field("Apprentice ID", ev.get("apprentice_id"))
+        _field("Apprentice", _apprentice_display(ev))
     with c2:
-        _field("Form / Activity", ev.get("task_name"))
-    with c3:
         _field("Date", str(ev.get("evaluation_date") or "—"))
 
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        _field("Observer", ev.get("evaluator_name"))
-    with c2:
-        _field("Type", ev.get("evaluation_type"))
-    with c3:
-        _field("Form Version", ev.get("form_version"))
+    result = (ev.get("result") or "").upper()
+    if result == "PASS":
+        st.markdown('<span class="result-pass">✅ PASS</span>', unsafe_allow_html=True)
+    elif result == "FAIL":
+        st.markdown('<span class="result-fail">❌ FAIL</span>', unsafe_allow_html=True)
+    else:
+        st.caption("Result: —")
+
+    st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
+    _field("Performance Objective", ev.get("performance_objective"))
 
     st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
     st.markdown("**Task Scores**")
@@ -517,20 +529,20 @@ def _render_completed_record(ev: dict) -> None:
     else:
         st.info("No task scores recorded for this evaluation.")
 
-    st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
-    result = (ev.get("result") or "").upper()
-    if result == "PASS":
-        st.markdown('<span class="result-pass">✅ PASS</span>', unsafe_allow_html=True)
-    elif result == "FAIL":
-        st.markdown('<span class="result-fail">❌ FAIL</span>', unsafe_allow_html=True)
-    else:
-        st.caption("Result: —")
-
     if ev.get("comments"):
-        st.markdown("<br>", unsafe_allow_html=True)
+        st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
         _field("Comments", ev.get("comments"))
 
-    # Download the completed record as a PDF (generated on the fly, read-only).
+    st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
+    st.markdown("**Signatures**")
+    c1, c2 = st.columns(2)
+    with c1:
+        _field("Evaluator", ev.get("evaluator_name"))
+    with c2:
+        _field("Apprentice", _apprentice_display(ev))
+
+    _field("Form Version", ev.get("form_version"))
+
     try:
         eval_row, task_rows = _pdf_payload_from_evaluation(ev)
         pdf_bytes = generate_jpm_pdf(eval_row, task_rows)
@@ -639,8 +651,8 @@ def _render_completed_docs_tab(supervisor_name: str | None) -> None:
     st.markdown("#### View a completed record")
 
     label_map = {
-        f'{format_date(r["eval_date"].date()) if pd.notna(r["eval_date"]) else "—"}'
-        f' | {r["employee_name"] or r["apprentice_id"]} | {r["task_name"]} '
+        f'{r["task_name"]} | {r["employee_name"] or r["apprentice_id"]} '
+        f'| {format_date(r["eval_date"].date()) if pd.notna(r["eval_date"]) else "—"} '
         f'| {(r["result"] or "—").upper()}': r["evaluation_id"]
         for _, r in fdf.iterrows()
     }
@@ -652,10 +664,15 @@ def _render_completed_docs_tab(supervisor_name: str | None) -> None:
     if selected_label == "— Select a record —":
         return
 
-    ev = _load_evaluation(label_map[selected_label])
+    selected_id = label_map[selected_label]
+    ev = _load_evaluation(selected_id)
     if not ev:
         st.error("Could not load this record. Please try again later.")
         return
+
+    sel_row = fdf[fdf["evaluation_id"] == selected_id]
+    if not sel_row.empty:
+        ev["employee_name"] = sel_row.iloc[0]["employee_name"]
 
     with st.container(border=True):
         _render_completed_record(ev)

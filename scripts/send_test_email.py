@@ -1,18 +1,9 @@
 """Isolated Microsoft Graph email test.
-
-Use this for the "send one test email to yourself" step BEFORE turning email on
-app-wide and BEFORE submitting any real JPM/HOSD form.
-
-It forces real sending in THIS process only (EMAIL_ENABLED=true here), so the
-running app stays in safe stub mode. Requires GRAPH_SENDER_MAILBOX in .env and
-Mail.Send (Application) consent already granted.
-
-Usage:
-    python scripts/send_test_email.py you@centerpointenergy.com
 """
 import os
 import sys
 from pathlib import Path
+from app.services.email_service import send_confirmation_email, _sender_mailbox
 
 # Make `app` importable and load .env.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -20,9 +11,12 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 # Force REAL sending for this script only (does not affect the app).
+# Both flags are required: EMAIL_DRY_RUN defaults to true and would otherwise
+# intercept the send as a simulation.
 os.environ["EMAIL_ENABLED"] = "true"
+os.environ["EMAIL_DRY_RUN"] = "false"
 
-from app.services.email_service import send_confirmation_email, _sender_mailbox
+
 
 
 def main() -> int:
@@ -37,16 +31,16 @@ def main() -> int:
         return 1
 
     print(f"Sending test email from {sender} to {recipient} ...")
-    ok, err = send_confirmation_email(
+    status, err = send_confirmation_email(
         recipient_email=recipient,
         subject="Graph email test — Apprentice Training App",
         body="If you received this, app-only Mail.Send is working correctly.",
     )
-    if ok:
+    if status == "SENT":
         print("✅ SUCCESS — Graph accepted the message (HTTP 202). Check the inbox.")
         return 0
 
-    print(f"❌ FAILED — {err}")
+    print(f"❌ {status} — {err}")
     print("   401/invalid_client  → client secret wrong/expired")
     print("   403/Authorization_RequestDenied → Mail.Send app permission/consent missing")
     print("   ErrorAccessDenied on sendMail   → ApplicationAccessPolicy / sender mailbox")

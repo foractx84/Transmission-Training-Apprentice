@@ -1,10 +1,4 @@
 """Google Cloud Storage service — upload/download files.
-
-Low-level Google client errors (permission denied, missing bucket/object,
-network failures, missing credentials) are translated into a single, friendly
-``GCSError`` so the calling page can show a clear message to the user instead of
-leaking a raw stack trace. This mirrors the SharePoint service, which also
-raises descriptive exceptions for its callers to handle.
 """
 import logging
 from typing import List

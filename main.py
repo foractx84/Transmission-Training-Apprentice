@@ -18,6 +18,7 @@ from app.core.rbac import (
     ROLE_AUDITOR,
 )
 from app.components.navigation import hide_sidebar
+from app.core.demo import demo_enabled
 
 st.set_page_config(
     page_title="Transmission Apprentice Training",
@@ -26,7 +27,29 @@ st.set_page_config(
 )
 
 
+def _run_demo() -> None:
+    """Login-free preview: expose only the apprentice-only view (sample data).
+
+    Routed before the Azure config check so the app is testable with no
+    credentials at all. Controlled by APP_DEMO_MODE / `?demo=1` — default off.
+    """
+    pg = st.navigation(
+        [
+            st.Page(
+                "pages/1_Apprentice_Records.py",
+                title="Apprentice Records (Demo)",
+                icon="📋",
+            )
+        ]
+    )
+    pg.run()
+
+
 def main():
+    if demo_enabled():
+        _run_demo()
+        return
+
     azure_config = get_azure_config()
 
     if not azure_config:

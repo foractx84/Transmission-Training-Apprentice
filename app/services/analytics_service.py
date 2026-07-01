@@ -210,7 +210,6 @@ def load_apprentices() -> list[dict]:
         return []
 
 
-# C3 FIX: Return pd.DataFrame() instead of [] on error
 @st.cache_data(ttl=3600, show_spinner="Loading apprentice records…")
 def load_apprentice_records_for(employee_id: str) -> pd.DataFrame:
     """All training records for one apprentice (server-side filter)."""
@@ -233,11 +232,94 @@ def load_apprentice_records_for(employee_id: str) -> pd.DataFrame:
             e,
         )
         st.error("Permission denied loading training records.")
-        return pd.DataFrame()  # ← C3 FIX: was []
+        return pd.DataFrame()
     except Exception as e:
         logger.error("Error in load_apprentice_records_for(%s): %s", employee_id, e)
         st.error("Failed to load training records. Please try again later.")
-        return pd.DataFrame()  # ← C3 FIX: was []
+        return pd.DataFrame()
+
+
+@st.cache_data(ttl=3600, show_spinner="Loading delayed tasks…")
+def load_delayed_tasks() -> pd.DataFrame:
+    """One row per delayed program task — the *who* and the *what*.
+
+    Unlike load_class_standing (one row per apprentice), this is course-level:
+    each row is a single delayed task so the Class Standing drilldown can show
+    which apprentice is delayed and exactly what they are delayed on.
+    """
+    try:
+        sql = f"""
+            SELECT
+              employee_id                              AS apprentice_id,
+              apprentice_name                          AS name,
+              apprenticeship_level                     AS level,
+              SUPERVISOR_NAME                          AS supervisor_name,
+              COALESCE(task_name, course_name, '—')    AS task,
+              qual_status                              AS status,
+              expected_completion_date
+            FROM {_view_fqn()}
+            WHERE {_POP_FILTER}
+              AND is_delayed
+              AND {_PROGRAM}
+            ORDER BY name, expected_completion_date
+        """
+        return _coerce_dates(
+            _get_client().query(sql).to_dataframe(create_bqstorage_client=False)
+        )
+    except Forbidden as e:
+        logger.error("BigQuery permission denied in load_delayed_tasks: %s", e)
+        st.error("Permission denied loading delayed tasks.")
+        return pd.DataFrame()
+    except Exception as e:
+        logger.error("Unexpected BigQuery error in load_delayed_tasks: %s", e)
+        st.error("Failed to load delayed tasks. Please try again later.")
+        return pd.DataFrame()
+
+
+@st.cache_data(ttl=3600, show_spinner="Loading alert items…")
+def load_alert_items() -> pd.DataFrame:
+    """One row per actionable item driving an apprentice's alerts.
+
+    Course-level (not one row per apprentice): every failed, coming-due, or
+    late/delayed program task. Lets the Documentation & Alerts section break
+    each apprentice's count into categories and show exactly what to fix.
+
+    `category` is assigned by severity priority: Failed > Late > Coming Due
+    (a task that is both failed and late is counted once, as Failed).
+    """
+    try:
+        sql = f"""
+            SELECT
+              employee_id                              AS apprentice_id,
+              apprentice_name                          AS name,
+              apprenticeship_level                     AS level,
+              SUPERVISOR_NAME                          AS supervisor_name,
+              COALESCE(task_name, course_name, '—')    AS task,
+              qual_status                              AS status,
+              CASE
+                WHEN is_failed     THEN 'Failed'
+                WHEN is_delayed    THEN 'Late'
+                WHEN is_coming_due THEN 'Coming Due'
+              END                                      AS category,
+              expected_completion_date,
+              requal_date
+            FROM {_view_fqn()}
+            WHERE {_POP_FILTER}
+              AND {_PROGRAM}
+              AND (is_failed OR is_delayed OR is_coming_due)
+            ORDER BY name, category, task
+        """
+        return _coerce_dates(
+            _get_client().query(sql).to_dataframe(create_bqstorage_client=False)
+        )
+    except Forbidden as e:
+        logger.error("BigQuery permission denied in load_alert_items: %s", e)
+        st.error("Permission denied loading alert items.")
+        return pd.DataFrame()
+    except Exception as e:
+        logger.error("Unexpected BigQuery error in load_alert_items: %s", e)
+        st.error("Failed to load alert items. Please try again later.")
+        return pd.DataFrame()
 
 
 # ---------------------------------------------------------------------------
@@ -391,7 +473,6 @@ def derive_docs_alerts(records: pd.DataFrame) -> list[dict]:
     return alerts
 
 
-# C2 FIX: Add try-except to load_class_standing()
 @st.cache_data(ttl=3600, show_spinner="Loading class standing…")
 def load_class_standing() -> list[dict]:
     """Load all apprentices with progress metrics for Class Standing page."""
@@ -412,6 +493,7 @@ def load_class_standing() -> list[dict]:
               COUNT(DISTINCT IF({_PROGRAM} AND is_completed, course_id, NULL)) AS completed_courses,
               COUNTIF(is_open_task AND {_PROGRAM})              AS open_tasks,
               COUNTIF(is_delayed   AND {_PROGRAM})              AS delayed_tasks,
+              COUNTIF(is_failed    AND {_PROGRAM})              AS failed_tasks,
               COUNTIF(is_failed     AND {_PROGRAM})
                 + COUNTIF(is_coming_due AND {_PROGRAM})         AS program_alerts,
 
@@ -452,11 +534,12 @@ def load_class_standing() -> list[dict]:
                 "supervisor_email": _clean_email(row.get("supervisor_email")) or None,
                 "division": row.get("division") or "",
                 "bu": row.get("bu") or "",
-                "org_group": row.get("org_group") or "",
+                "org_group": "" if pd.isna(row.get("org_group")) else str(row.get("org_group")),
                 "enrolled_courses": int(row["enrolled_courses"] or 0),
                 "completed_courses": int(row["completed_courses"] or 0),
                 "open_tasks": int(row["open_tasks"] or 0),
                 "delayed_tasks": int(row["delayed_tasks"] or 0),
+                "failed_tasks": int(row["failed_tasks"] or 0),
                 "program_alerts": int(row["program_alerts"] or 0),
                 "completion_pct": _safe_float(row["completion_pct"]),
                 "status": row.get("status") or "On Track",
@@ -629,7 +712,7 @@ def load_program_analytics(supervisor_name: str | None = None) -> list[dict]:
                 "supervisor_name": row.get("supervisor_name") or "Unknown",
                 "division": row.get("division") or "",
                 "bu": row.get("bu") or "",
-                "org_group": row.get("org_group") or "",
+                "org_group": "" if pd.isna(row.get("org_group")) else str(row.get("org_group")),
                 "apprentice_year": (
                     int(row["apprentice_year"])
                     if pd.notna(row.get("apprentice_year"))

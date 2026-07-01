@@ -73,7 +73,10 @@ def validate_azure_config() -> Tuple[bool, str]:
         if not os.getenv("AZURE_CLIENT_ID"):
             missing.append("AZURE_CLIENT_ID")
         if not os.getenv("AZURE_CLIENT_SECRET"):
-            missing.append("AZURE_CLIENT_SECRET")
+            if os.getenv("AZURE_CLIENT_SECRET_FILE"):
+                missing.append("AZURE_CLIENT_SECRET_FILE (file missing or unreadable)")
+            else:
+                missing.append("AZURE_CLIENT_SECRET")
 
         return False, f"Missing required configuration: {', '.join(missing)}"
 

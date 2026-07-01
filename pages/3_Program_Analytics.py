@@ -15,11 +15,6 @@ import streamlit as st
 from app.components.navigation import require_auth, render_sidebar
 from app.core.rbac import has_role, ROLE_ADMIN, ROLE_SUPERVISOR, ROLE_AUDITOR
 from app.services.analytics_service import load_program_analytics, load_analytics_trend
-from app.services.bigquery_service import (
-    fetch_distinct_course_names,
-    fetch_evaluation_ids_for_course,
-    fetch_evaluation_by_id,
-)
 from app.utils.formatters import format_date
 from app.utils.org_groups import (
     BUSINESS_GROUPS,
@@ -451,11 +446,11 @@ def _render_completion_by_division(df: pd.DataFrame) -> None:
 # ── Section: Completion by Supervisor — paginated table ───────────────────────
 
 
-def _render_supervisor_table(df: pd.DataFrame) -> None:
+def _render_supervisor_table(df: pd.DataFrame) -> str | None:
     st.markdown("##### Supervisor Summary")
     if df.empty:
         st.info("No data.")
-        return
+        return None
 
     sup_df = (
         df.groupby("supervisor_name")
@@ -487,27 +482,45 @@ def _render_supervisor_table(df: pd.DataFrame) -> None:
         "Page", min_value=1, max_value=total_pages, value=1, step=1, key="sup_page"
     )
     start = (page - 1) * page_size
-    st.dataframe(
-        sup_df.iloc[start : start + page_size],
+    page_slice = sup_df.iloc[start : start + page_size]
+    event = st.dataframe(
+        page_slice,
         use_container_width=True,
         hide_index=True,
+        on_select="rerun",
+        selection_mode="single-row",
+        key="sup_select",
     )
     st.caption(
         f"Showing {start + 1}–{min(start + page_size, len(sup_df))} of {len(sup_df)} supervisors"
     )
 
+    selected_rows = event.selection.rows if event and event.selection else []
+    if selected_rows:
+        return str(page_slice.iloc[selected_rows[0]]["Supervisor"])
+    return None
+
 
 # ── Section: At Risk — paginated table ───────────────────────────────────────
 
 
-def _render_at_risk_table(df: pd.DataFrame) -> None:
+def _render_at_risk_table(
+    df: pd.DataFrame, selected_supervisor: str | None = None
+) -> None:
     st.markdown("##### Individual Apprentice Details")
-    at_risk = df[df["status"] == "At Risk"].sort_values(
-        "failed_courses", ascending=False
-    )
+
+    at_risk = df[df["status"] == "At Risk"]
+    if selected_supervisor:
+        at_risk = at_risk[at_risk["supervisor_name"] == selected_supervisor]
+    at_risk = at_risk.sort_values("failed_courses", ascending=False)
 
     if at_risk.empty:
-        st.success("✅ No at-risk apprentices.")
+        if selected_supervisor:
+            st.success(
+                f"✅ No at-risk apprentices for {escape(selected_supervisor)}."
+            )
+        else:
+            st.success("✅ No at-risk apprentices.")
         return
 
     display = at_risk[
@@ -538,7 +551,12 @@ def _render_at_risk_table(df: pd.DataFrame) -> None:
     page_size = 10
     total_pages = max(1, -(-len(display) // page_size))
     page = st.number_input(
-        "Page", min_value=1, max_value=total_pages, value=1, step=1, key="risk_page"
+        "Page",
+        min_value=1,
+        max_value=total_pages,
+        value=1,
+        step=1,
+        key=f"risk_page_{selected_supervisor or 'all'}",
     )
     start = (page - 1) * page_size
     st.dataframe(
@@ -546,163 +564,16 @@ def _render_at_risk_table(df: pd.DataFrame) -> None:
         use_container_width=True,
         hide_index=True,
     )
-    st.caption(
-        f"Showing {start + 1}–{min(start + page_size, len(display))} of {len(display)} at-risk apprentices"
+    base_caption = (
+        f"Showing {start + 1}–{min(start + page_size, len(display))} "
+        f"of {len(display)} at-risk apprentices"
     )
-
-
-# ── Section: Training Forms — read-only JPM viewer ───────────────────────────
-
-
-def _field(label: str, value: str) -> None:
-    st.markdown(
-        f'<div class="form-field-label">{escape(label)}</div>'
-        f'<div class="form-field-value">{escape(str(value or "—"))}</div>',
-        unsafe_allow_html=True,
-    )
-
-
-def _render_readonly_form(ev: dict) -> None:
-    st.markdown('<div class="form-section">', unsafe_allow_html=True)
-
-    c1, c2 = st.columns(2)
-    with c1:
-        _field("Apprentice ID", ev.get("apprentice_id", ""))
-    with c2:
-        _field("Course ID", ev.get("course_id", ""))
-    _field("Task Name", ev.get("task_name", ""))
-
-    st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
-
-    c1, c2 = st.columns(2)
-    with c1:
-        _field("Evaluator", ev.get("evaluator_name", ""))
-    with c2:
-        _field("Evaluator Emp ID", ev.get("evaluator_emp_id", ""))
-
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        _field("Date", str(ev.get("evaluation_date", "")))
-    with c2:
-        _field("Type", ev.get("evaluation_type", ""))
-    with c3:
-        _field("Form Version", ev.get("form_version", ""))
-
-    st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
-    _field("Performance Objective", ev.get("performance_objective", ""))
-    st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
-
-    st.markdown("**Tasks**")
-    tasks = ev.get("tasks", [])
-    if tasks:
-        task_df = pd.DataFrame(tasks)[["task_index", "task_description", "score"]]
-        task_df.columns = ["#", "Task Description", "Score (1–5)"]
-        st.dataframe(task_df, use_container_width=True, hide_index=True)
-    else:
-        st.info("No tasks recorded.")
-
-    st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
-
-    result = ev.get("result", "")
-    if result == "PASS":
-        st.markdown('<span class="result-pass">✅ PASS</span>', unsafe_allow_html=True)
-    else:
-        st.markdown('<span class="result-fail">❌ FAIL</span>', unsafe_allow_html=True)
-
-    st.markdown("<br>", unsafe_allow_html=True)
-    _field("Comments", ev.get("comments", ""))
-
-    st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
-
-    c1, c2 = st.columns(2)
-    with c1:
-        _field("Submitted By", ev.get("submitted_by", ""))
-    with c2:
-        _field("Submitted At", str(ev.get("submitted_at", "")))
-
-    st.markdown("</div>", unsafe_allow_html=True)
-
-
-def _render_training_forms(employee_ids: tuple[str, ...] | None) -> None:
-    """
-    Render the JPM/HOSD evaluation viewer.
-
-    Args:
-        employee_ids: Apprentice scope for supervisor-only users (their team).
-            Pass None for admins/auditors to see all evaluations.
-    """
-    st.markdown(
-        '<div class="section-header">📄 Documentation & Audit Analytics — JPM & HOSD Records</div>',
-        unsafe_allow_html=True,
-    )
-    st.markdown("---")
-
-    try:
-        with st.spinner("Loading courses…"):
-            courses = fetch_distinct_course_names(employee_ids=employee_ids)
-    except Exception as e:
-        logger.error("fetch_distinct_course_names failed: %s", e)
-        st.error("Could not load evaluation records. Please try again later.")
-        return
-
-    if not courses:
-        st.info("No evaluation records found.")
-        return
-
-    course_name_options = [c["course_name"] for c in courses]
-    selected_course_name = st.selectbox(
-        "Select Course Name",
-        options=["— Select a course —"] + course_name_options,
-        key="analytics_course_name",
-    )
-
-    if selected_course_name == "— Select a course —":
-        return
-
-    try:
-        with st.spinner("Loading evaluations…"):
-            evaluations = fetch_evaluation_ids_for_course(
-                selected_course_name,
-                employee_ids=employee_ids,
-            )
-    except Exception as e:
-        logger.error("fetch_evaluation_ids_for_course failed: %s", e)
-        st.error("Could not load evaluations for this course. Please try again later.")
-        return
-
-    if not evaluations:
-        st.info("No evaluations found for this course.")
-        return
-
-    eval_options = {
-        f"{e['evaluation_date']} | Apprentice {e['apprentice_id']} | {e['result']}": e[
-            "evaluation_id"
-        ]
-        for e in evaluations
-    }
-    selected_eval_label = st.selectbox(
-        "Select Evaluation",
-        options=["— Select an evaluation —"] + list(eval_options.keys()),
-        key="analytics_eval_id",
-    )
-
-    if selected_eval_label == "— Select an evaluation —":
-        return
-
-    try:
-        with st.spinner("Loading form…"):
-            ev = fetch_evaluation_by_id(eval_options[selected_eval_label])
-    except Exception as e:
-        logger.error("fetch_evaluation_by_id failed: %s", e)
-        st.error("Could not load the evaluation form. Please try again later.")
-        return
-
-    if not ev:
-        st.error("Could not load evaluation. Please try again.")
-        return
-
-    st.markdown("<br>", unsafe_allow_html=True)
-    _render_readonly_form(ev)
+    if selected_supervisor:
+        base_caption += (
+            f" · 🔗 filtered to {escape(selected_supervisor)} "
+            "(click the same supervisor row again to clear)"
+        )
+    st.caption(base_caption)
 
 
 # ── Section: Financial Analytics (Placeholder) ────────────────────────────────
@@ -964,21 +835,14 @@ def main() -> None:
     st.markdown("---")
     col_sup, col_risk = st.columns(2)
     with col_sup:
-        _render_supervisor_table(filtered)
+        selected_supervisor = _render_supervisor_table(filtered)
     with col_risk:
-        _render_at_risk_table(filtered)
+        _render_at_risk_table(filtered, selected_supervisor)
 
-    # 6. Documentation & Audit Analytics — Training Forms ─────────────────────
-    # Scope viewer to the supervisor's apprentices only. Admins/auditors see all.
-    viewer_emp_ids: tuple[str, ...] | None = None
-    if supervisor_name_filter:
-        viewer_emp_ids = tuple(sorted(df["id"].dropna().astype(str).unique().tolist()))
-    _render_training_forms(viewer_emp_ids)
-
-    # 7. Financial Analytics Placeholder ──────────────────────────────────────
+    # 6. Financial Analytics Placeholder ──────────────────────────────────────
     _render_financial_analytics()
 
-    # 8. Detailed Breakdown Table ─────────────────────────────────────────────
+    # 7. Detailed Breakdown Table ─────────────────────────────────────────────
     _render_table(filtered)
 
 
